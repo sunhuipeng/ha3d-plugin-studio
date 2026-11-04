@@ -1,0 +1,195 @@
+# ha3d-plugin-studio
+
+图形化的 [ha-3d-home](../ha-3d-home) 3D 插件开发台：在浏览器里创建插件项目、装配模型、绑定实体、实时预览，并通过内置 **MCP Server** 让 AI 助手（如 WorkBuddy）全流程读写与验证——从一句话需求到可安装的插件压缩包。
+
+## 核心能力
+
+### 1. MCP 能力（26 个工具）
+
+服务内置 MCP Server（SSE 传输），连接地址：
+
+```
+http://localhost:8098/mcp/sse
+```
+
+在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。工具分四组：
+
+**配置读取**
+
+| 工具 | 说明 |
+| --- | --- |
+| `studio_get_project` | 一站式读取全部配置（属性 / 字段 / 样式 / 部件 / 提示词 / 快照状态），开工第一步 |
+| `studio_snapshot` | **配置快照**：把当前的属性（settings）、字段（fields）、样式（styles）复制进 `project.snapshot`。默认记录，`compareOnly` 只对比，`clear` 删除。发布 / 导出前对账，配置改过就提醒重新生成 |
+
+**插件代码**
+
+| 工具 | 说明 |
+| --- | --- |
+| `studio_get_code` | 读自定义代码（唯一的信息入口） |
+| `studio_write_code` | 提交代码：语法体检 → 落盘 → 前端实时重建渲染 |
+
+**项目管理与视觉验证**
+
+| 工具 | 说明 |
+| --- | --- |
+| `studio_list_projects` | 列出所有项目（id / 名称 / 类型 / 模型数） |
+| `studio_where` | 当前编辑页停在哪：启动页（`page:"home"`）/ 项目编辑页（返回 `projectId`）/ 没打开页面（`"none"`），判断依据是 URL 路由 `#/project/<id>`；`tabs` 列出每个标签页的 `clientId` / 可见 / 聚焦 |
+| `studio_single_window` | **单窗口收敛**：同时开着多个标签页时，MCP 操作会在它们之间乱跳。先问一遍所有连接「谁可见/有焦点」，挑一个保留（有焦点 > 可见 > 最近连上，可用 `keepClientId` 指定，`projectId` 限定范围），其余前端收到关闭指令后自动断开中继并关掉页面；不认指令的旧页面由服务端兜底断开。`dryRun` 只列计划 |
+| `studio_open_project` | 让编辑页切换到指定项目（URL 直跳） |
+| `studio_view` | 转模型 / 移模型、转相机 / 平移 / 缩放（先摆姿态再出图） |
+| `studio_screenshot` | 按预设视角（iso / front / top…）截图 |
+| `studio_set_entity` | 给绑定实体推状态，验证「状态变化 → 造型变化」 |
+| `studio_click` / `studio_label` | 模拟点击设备 / 读取状态标签 |
+| `studio_set_style` | 切换样式，验证多造型 |
+| `studio_set_option` | 调节样式参数取值（等价拖左下卡片滑条）：改 `options[].def` 后重跑代码出图，返回改前/改后值 + 引擎实际吃到的 `ctx.options`；不传 `key` 只读当前参数值，供 AI 自动核验参数效果 |
+| `studio_upload_model` | 上传 GLB 模型到项目模型库 |
+| `studio_list_models` | 列出当前项目的模型：大小、更新时间、代码引用条数、可选结构摘要 |
+| `studio_get_model` | 把项目里的 GLB 导出到本机（返回绝对路径 + 结构摘要：mesh/材质/动画数、包围盒、逐 mesh 尺寸、顶层节点名），便于 AI 本地量尺寸、拆部件 |
+| `studio_split_model` | 按顶层节点把 GLB 拆成多个独立部件模型（顶点已烘焙世界变换） |
+| `studio_delete_model` | 删除模型文件，并返回仍在引用它的代码行 |
+| `studio_rename_model` | 重命名模型文件，并返回仍在用旧文件名的代码行 |
+| `studio_fix_model_materials` | 修复 GLB 材质发黑（sRGB 未转 / metallic 偏高 /  roughness 偏低 / 压暗扩展）；**原地改写不留备份**（幂等可反复跑），`dryRun` 只体检 |
+| `studio_get_runtime` | 运行期体检：渲染错误、当前样式与参数实际取值、实体状态、引擎实例数、浏览器控制台报错（含被引擎吞掉的 `update` 异常） |
+| `studio_reload` | 刷新编辑页（加载新构建） |
+
+**交付**
+
+| 工具 | 说明 |
+| --- | --- |
+| `studio_export_project` | 导出插件压缩包（zip 以 base64 放在返回的 `zipBase64` 字段，不落盘、不改版本号）。返回里的 `configDrift` 是「配置 vs 快照」的差异（不阻断导出） |
+| `studio_publish_project` | 发布到 ha-3d-home（远程安装 + 版本号写回）。返回里的 `configDrift` 同上 |
+
+> 项目 id 可省略：自动使用当前打开了编辑页的项目。截图 / 写码立即运行等前端中继工具依赖浏览器打开着编辑页。
+> **同时开了多个标签页时，先 `studio_single_window` 收敛成一个再动手** —— 否则截图、调参、写码可能落到不同标签页，看到的画面和代码对不上。
+
+### 2. 接入 WorkBuddy 快速零代码开发
+
+配合 WorkBuddy 技能 **`ha3d-plugin-dev`**，用自然语言一句话即可生成插件（如「用 ha3d-plugin-dev 技能开发一个落地灯插件」）。技能内化的五步流程：
+
+1. **拉取配置** —— `studio_get_project` 拿属性 / 字段 / 样式 / 部件 / 提示词（`aiPrompt` 为用户需求，必读）；
+2. **阅读参考** —— 读 ha-3d-home 的 `PLUGIN-DEV.md`（ctx API 权威口径）与同类插件源码，资料不足会弹窗向用户补问；
+3. **开发代码** —— 写单文件 `plugin.js` 并 `studio_write_code` 提交（服务端先做语法体检）；
+4. **验证效果** —— `studio_set_entity` 构造实体状态覆盖边界，`studio_set_option` 调样式参数（如亮度）并回读实际生效值，`studio_screenshot` 截图确认形态与动画；
+5. **收尾** —— `studio_snapshot` 记录配置快照（属性 + 字段 + 样式），汇报改动与验证结果，可选 `studio_publish_project` 直接发布。
+
+整个过程无需手写一行代码，模型上传、样式参数、实体绑定都在 studio 界面或 MCP 工具中完成。
+
+技能包随仓库提供：`skill/ha3d-plugin-dev/`，复制到 `~/.workbuddy/skills/` 即可安装，详见 [`skill/README.md`](skill/README.md)。
+
+### 3. 配置快照与「重新生成」提醒
+
+`plugin.js` 是按**某一版配置**写的：读哪些 `options`、绑哪些字段、有哪些样式。用户在面板上改了配置，代码不会自己跟着变，于是出现「配置改了、画面没变」。
+
+- **记录**：`studio_snapshot`（或编辑页顶栏的快照徽标）把当前的 `settings` / `fields` / `styles` 复制进 `project.snapshot`（含时间、备注、当时版本与代码行数）。
+- **对账**：每次保存后、以及发布 / 导出前，服务端按 key 比对（样式按 id、参数按 key、字段按 key；`version` 不参与，发布 bump 不算漂移）。
+- **提醒但不拦**：不一致时编辑页顶栏徽标变橙并弹窗列出差异（属性 x 处 / 样式 y 处 / 字段 z 处），确认后仍可继续发布或导出；MCP 的 `studio_export_project` / `studio_publish_project` 也会在返回里带 `configDrift`。**不强制**重新生成。
+- **刷新**：让 AI 按新配置重新生成后，再记录一次快照即可。快照只能通过 `/api/projects/:id/snapshot` 维护，编辑页保存不会覆盖它。
+
+### 4. 样式与参数以项目为准
+
+AI 生成的 `plugin.js` 里常把 `styles` / `options` 写死（生成那一刻的快照）。studio **不把它当依据**：
+
+- **预览**：`PluginEngine.register()` 注册时，用项目的 `styles` / `fields` 覆盖代码里的同名字段（`client/src/engine/project-config.js`）。样式按 id 对齐，代码里同 id 的条目只贡献函数（背景插件的 `style.apply` 是渲染主体）；项目完全没配时才退回代码里的。
+- **发布 / 导出**：打包时把同一份配置快照注进 `plugin.js`（`server/inject-config.js`）——在原代码外面包一层，执行期间拦截 `PluginEngine.register` 先合并配置再注册，安装端（ha-3d-home）无需改动。页面预览用的 `GET /api/projects/:id/build` 仍返回原始代码，所以代码面板里看到的就是项目里那份。
+- **前提**：代码逻辑必须读 `ctx.options.<key>`（而不是写死常量），否则在面板/卡片里调参数不会影响画面。
+
+### 5. 三种插件类型
+
+| kind | 典型设备 | 特点 |
+| --- | --- | --- |
+| `device` 设备 | 灯、开关、风扇、摄像头、传感器… | 实体状态驱动造型变化（亮灭 / 开关 / 巡视）；支持点击交互（click 配置）与悬浮状态标签；plan2d 绘制平面图标 |
+| `opening` 门窗 | 门、窗、卷帘门、窗帘… | 开合比例（0~100）驱动动画，`ctx.animate` 缓动；plan2d 按平面图惯例绘制（门洞 + 开启弧等） |
+| `background` 背景 | 草地、沙滩、马路、院子… | `apply(ctx)` 直接返回渲染好的 3D 内容（`{ group }`），不调用 model3d / plan2d；用「安全范围」长宽占位盒代替房屋体块，范围内禁止放置物品。`ctx.house` / `ctx.safe` 与 ha-3d-home 同口径：原点 = 背景中心，`offsetX/offsetZ`（房屋相对背景中心的偏移）先算进 house/safe，背景 group 再摆到「房屋中心 − 偏移」，占位盒钉在世界原点 |
+
+### 6. 离线打包与在线安装
+
+**离线打包**（三种入口等价）：
+
+- 页面右上角「发布到 ha-3d-home ▾」→ **导出插件包**；
+- HTTP：`GET /api/projects/:id/export`；
+- MCP：`studio_export_project` → zip 以 base64 放在返回的 `zipBase64` 字段（不落盘）。
+
+包内结构（无顶层目录）：`plugin.json`（清单）+ `plugin.js`（注册代码）+ `models/*.glb`。拿到压缩包后也可在 ha-3d-home 页面手动导入（`/api/plugins/import`）。
+
+**项目备份 / 迁移**（与插件包不同，这是整个项目文件夹原样打包）：
+
+- 页面：「发布到 ha-3d-home ▾」→ **导出项目**；启动页右下角「导入项目」按钮（设置上方）可把备份 zip 还原成新项目（id 冲突自动换新 id）。
+- HTTP：`GET /api/projects/:id/export-project` 导出，`POST /api/projects/import` 导入。
+- 包内结构：`project.json` + `preview.png` + `models/*`（不含编辑器内部 backups/）。所有导出服务端都不落盘。
+
+**在线安装**（一键发布到运行中的 ha-3d-home）：
+
+- 页面「发布到 ha-3d-home」按钮 / MCP `studio_publish_project`；
+- 流程：服务端打包 zip → `POST {host}/api/plugins/install?id=<插件id>&version=<v>`（Header 带 `X-Install-Key` 安装密钥）→ ha-3d-home 校验后解压到 `custom/plugins/<id>/`，已存在则整体替换（重复发布 = 覆盖升级）→ 成功后版本号写回项目 JSON；
+- 「发布前升一位版本号」避免浏览器缓存旧 `plugin.js`；
+- 发布目标（ha-3d-home 主机地址 + 安装密钥）在 studio 界面设置里配置，存于 `data/config.json`。
+
+## 快速开始
+
+```bash
+npm install
+npm run client:build   # 构建前端（Vue3 + Vite，产物 client/dist）
+npm start              # 启动服务 → http://localhost:8098
+```
+
+前端开发模式（可选）：`npm run client:dev`（Vite dev server）。
+
+发布到 ha-3d-home 前需该服务在线（默认 `http://localhost:8077`），并在 studio 设置里填好主机地址与安装密钥。
+
+### Docker 部署
+
+单容器、数据走卷（与 ha-3d-home 同款方案）：
+
+```bash
+docker compose up -d --build
+```
+
+| 项 | 说明 |
+| --- | --- |
+| 端口 | `8098`（编辑台 + MCP 同端口） |
+| 数据卷 | `./data:/data` —— 插件项目（`projects/`）与全局配置（`config.json`），升级镜像不丢 |
+| 健康检查 | `GET /api/health`（compose 已配 healthcheck） |
+| MCP 地址 | `http://主机IP:8098/mcp/sse` |
+| 环境变量 | `PORT`（默认 8098）、`HA3D_STUDIO_DATA_DIR`（默认容器内 `/data`） |
+
+容器内访问宿主机上的 ha-3d-home 发布：Mac/Windows 填 `http://host.docker.internal:8099`，Linux 填宿主机内网 IP。
+
+**离线打包**（无镜像仓库的机器，同 ha-3d-home 的 `pack:image` 体系）：
+
+```bash
+npm run pack:image           # 本机架构 → dist/ha3d-plugin-studio-latest-<arch>.tar
+npm run pack:image:amd64     # Apple Silicon 给 x86 服务器打包（显式指定平台）
+npm run pack:image:arm64     # 给 ARM 服务器 / NAS 打包
+# 目标机: docker load -i <tar> → 按 compose 方式起容器
+```
+
+
+## 项目结构
+
+```
+server/            Node 服务端（Express, 端口 8098）
+  index.js         入口：静态托管 client/dist + API + WS + MCP(SSE)
+  routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布）
+  mcp/             26 个 MCP 工具定义（按域拆分：config/preview/projects/models/publish + helpers）
+  mcp-tools.js     MCP 工具装配薄壳（把上面各域 register 进 server）
+  mcp-sse.js       MCP SSE 传输
+  ws-hub.js        WebSocket 中继（服务端 ↔ 浏览器编辑页）
+  plugin-pkg.js    打包 + 远程发布（HTTP 与 MCP 共用）
+  generator.js     manifest 拼装与配置校验（代码一律取 customJs）
+  config.js        路径 / 项目读写 / 远程目标配置
+client/src/        前端（Vue3 + Vite）
+  components/      PluginStage（3D 预览）/ RightPanel / LeftRail / Home
+  engine/          plugin-engine（插件装载与运行）/ plugin-preview / three-host
+data/
+  projects/<id>/   每个插件项目：project.json + models/*.glb + preview.png
+  config.json      远程发布目标（host + key）
+scripts/           mcp-smoke 冒烟测试 + pack-image.sh 离线镜像打包
+skill/             可安装的技能包 ha3d-plugin-dev/（SKILL.md + references + mcp-call.cjs）
+Dockerfile         多阶段构建：镜像内构建前端 → 轻量运行层（数据走 /data 卷）
+docker-compose.yml 单容器部署（8098 端口 + /data 挂载 + healthcheck）
+```
+
+## 相关文档
+
+- ha-3d-home：`../ha-3d-home/README.md`（主项目）、`../ha-3d-home/PLUGIN-DEV.md`（插件 API 权威口径）
+- WorkBuddy 技能：`skill/ha3d-plugin-dev/`（五步开发流程 + MCP 工具完整清单 + 背景插件规范），安装见 [`skill/README.md`](skill/README.md)

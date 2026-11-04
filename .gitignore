@@ -1,0 +1,8 @@
+node_modules/
+client/node_modules/
+client/dist/
+data/
+*.log
+.DS_Store
+_shots/
+package-lock.json

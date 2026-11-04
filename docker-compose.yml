@@ -1,0 +1,25 @@
+services:
+  ha3d-plugin-studio:
+    build: .
+    # 构建镜像发布后可改为 image: your-registry/ha3d-plugin-studio:latest
+    image: ha3d-plugin-studio:latest
+    container_name: ha3d-plugin-studio
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    volumes:
+      - ./data:/data    # 插件项目（projects/）+ 全局配置（config.json），升级镜像不丢
+    environment:
+      NODE_ENV: production       # 生产模式
+      PORT: 8098
+      HA3D_STUDIO_DATA_DIR: /data
+      # MCP 地址: http://主机IP:8098/mcp/sse （WorkBuddy 里添加这个地址即可接入 AI）
+      # 发布目标: 页面里配置 remote.host，容器内访问宿主机上的 ha-3d-home 用
+      #   Mac/Windows: http://host.docker.internal:8099
+      #   Linux:       http://宿主机内网IP:8099
+    mem_limit: 256m         # GLB 拆分/打包时会多吃一些内存
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8098/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
