@@ -64,6 +64,9 @@ async function confirmDelModel(f) {
   delPops.value[f]?.hide();
   await act.deleteModel(f);
 }
+
+/* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
+const LOCK = computed(() => S.lock.locked);
 </script>
 
 <template>
@@ -87,7 +90,7 @@ async function confirmDelModel(f) {
           <PartThumb :proj-id="S.proj.id" :file="f" />
           <span class="p-name">{{ f.replace(/\.glb$/i, '') }}</span>
           <span class="meta">{{ f }}</span>
-          <el-button v-if="nodeCount(f) > 1" link class="node-toggle" :class="{ on: expandedFiles.has(f) }"
+          <el-button :disabled="LOCK" v-if="nodeCount(f) > 1" link class="node-toggle" :class="{ on: expandedFiles.has(f) }"
             :title="`GLB 含 ${nodeCount(f)} 个独立 node 节点，展开查看`" @click.stop="toggleNodes(f)">
             {{ expandedFiles.has(f) ? '▾' : '▸' }} {{ nodeCount(f) }} 节点
           </el-button>
@@ -95,13 +98,13 @@ async function confirmDelModel(f) {
           <el-popover placement="left" :width="230" trigger="click"
             :ref="(el) => (delPops[f] = el)">
             <template #reference>
-              <el-button link type="danger" title="删除模型文件"
+              <el-button :disabled="LOCK" link type="danger" class="lock-block" title="删除模型文件"
                 @click.stop>删除</el-button>
             </template>
             <div class="del-pop-text">删除 <b>{{ f }}</b> ？<br>文件会从 models 目录移除，不可恢复。</div>
             <div class="row-btns">
-              <el-button size="small" @click="delPops[f]?.hide()">取消</el-button>
-              <el-button size="small" type="danger" @click="confirmDelModel(f)">确定删除</el-button>
+              <el-button :disabled="LOCK" size="small" @click="delPops[f]?.hide()">取消</el-button>
+              <el-button :disabled="LOCK" size="small" type="danger" class="lock-block" @click="confirmDelModel(f)">确定删除</el-button>
             </div>
           </el-popover>
           <!-- 嵌套子列表：GLB 内节点树，点击预览子模型，✂ 可把某节点导出成独立 .glb -->
@@ -114,12 +117,12 @@ async function confirmDelModel(f) {
               <PartThumb :proj-id="S.proj.id" :file="f" :node="n.name" class="p-node-thumb" />
               <span class="p-node-name">{{ n.name }}</span>
               <span v-if="n.depth" class="p-node-depth">子级</span>
-              <el-button link type="primary" class="p-node-split-one"
+              <el-button :disabled="LOCK" link type="primary" class="p-node-split-one lock-block"
                 :title="`只把「${n.name}」导出为独立模型，其余节点合成 __rest.glb`"
                 @click.stop="act.splitModelNode(f, n.name)">✂ 拆分</el-button>
             </li>
             <li class="p-node-split">
-              <el-button link type="primary" title="把每个节点都导出为独立 .glb 加入文件库（原文件保留）"
+              <el-button :disabled="LOCK" link type="primary" class="lock-block" title="把每个节点都导出为独立 .glb 加入文件库（原文件保留）"
                 @click.stop="act.splitModelFile(f)">✂ 全部拆分（每节点一个模型）</el-button>
             </li>
           </ul>
@@ -130,7 +133,7 @@ async function confirmDelModel(f) {
     </div>
 
     <!-- 固定在面板最底部：导入入口始终可见，不随模型列表滚动 -->
-    <el-button type="primary" plain class="import-btn" @click="glbInput && glbInput.click()">＋ 导入 GLB 文件</el-button>
+    <el-button :disabled="LOCK" type="primary" plain class="import-btn lock-block" @click="glbInput && glbInput.click()">＋ 导入 GLB 文件</el-button>
     <input ref="glbInput" type="file" accept=".glb" multiple hidden @change="onGlbFiles">
   </section>
 </template>

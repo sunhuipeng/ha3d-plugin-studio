@@ -13,7 +13,14 @@ const TYPE_DOMAIN = {
   light: 'light', switch: 'switch', fan: 'fan', cover: 'cover',
   climate: 'climate', water_heater: 'water_heater', media_player: 'media_player',
   vacuum: 'vacuum', camera: 'camera', sensor: 'sensor', other: 'switch',
+  /* 门/窗是 type:'door'/'window' 的贴墙设备，没有「主实体」概念（实体全在 fields 里），
+     这里只用于「按域造 mock 实体」的兜底 */
+  door: 'binary_sensor', window: 'binary_sensor',
 };
+
+/* 贴墙设备（门/窗）：与设备同一 kind:'device'，只在数据位置与缺省规则上不同 */
+const WALL_TYPES = { door: 1, window: 1 };
+export const isWallType = (type) => !!WALL_TYPES[type];
 
 /* 门窗类里「哪个字段代表门/窗的开合状态」：按 key 语义猜，排除掉比例类字段
    （opening_ratio 名字里也有 open，必须先排除） */
@@ -128,6 +135,8 @@ export class PluginPreview {
         return this.describe();
       }
       this.host.setModel(api.group);
+      /* 设备类离地高度：实例整体抬到 obj.z（样式 z，门恒 0）。背景插件自己管偏移，不抬 */
+      this._applyGroundLift(api.group);
       /* 设备类：准备点击控制与标签（背景/门窗没有这个概念） */
       this._setupClick(def, api.group);
       /* 背景插件：藏掉网格/坐标轴（120m 地面下它们只会添乱），换回设备/门窗预览时恢复。
@@ -170,6 +179,63 @@ export class PluginPreview {
     });
   }
 
+  /* ---------------- 快速重生：不重新执行代码，只重建实例 ----------------
+   * 改参数值 / 切样式后调用。内存 def（styles/options）已是最新（UI 直接改的），
+   * 这里跳过 new Function 重新解读代码、跳过实体状态清空，几何按新值重画：
+   *   · 引擎只 clearInstances（dispose 旧实例），defs 原地复用
+   *   · 实体状态保留（只对新增实体 define，避免把「灯已开」重置成 off）
+   *   · 相机不动（不像 load 会重新取景），拖滑条时画面不跳
+   * 没有可用的 def（还没成功 load 过 / 上次代码执行失败）时抛错，调用方回退全量 load。
+   * @param {object} o  { styleId?, safeW?, safeD? }（缺省沿用当前样式） */
+  async respawn(o) {
+    const opts = o || {};
+    if (!this.def) throw new Error('还没有成功渲染过插件（先完整渲染一次）');
+    this.loading = true;
+    this.error = '';
+    try {
+      this.engine.clearInstances();
+      this.host.clearModel();
+
+      /* 重选样式（可切样式）：内存 def.styles 里找，找不到回落第一个 */
+      const style = this._resolveStyle(this.def, opts.styleId != null ? opts.styleId : this.styleId);
+      this.style = style || null;
+      this.styleId = style ? style.id : '';
+      this.obj = this._makeObj(this.def, style);
+      /* 已存在的实体不重新 define（define 会把状态重置成缺省），只补新增的 */
+      if (this.obj.entityId && !this.ha.has(this.obj.entityId)) this.ha.define(this.obj.entityId);
+      this.engine.fieldsOf(this.def).forEach((f) => {
+        const eid = this.obj[f.key];
+        if (eid && !this.ha.has(eid)) this.ha.define(eid);
+      });
+
+      const api = await this.engine.spawn(this.def, this.obj, {
+        style, safeW: opts.safeW, safeD: opts.safeD,
+      });
+      if (api && api.stale) {
+        this.loading = false;
+        return this.describe();
+      }
+      this.host.setModel(api.group);
+      this._applyGroundLift(api.group);   // 离地高度（样式 z）即时生效
+      this._setupClick(this.def, api.group);
+      this.safeBox = api.safeBox || null;
+      this.bgGroup = api.bgGroup || null;
+      if (this.def.kind === 'background') { this.host.setGrid(false); this.host.setAxes(false); }
+      this.lastLoadedAt = Date.now();
+      this.loading = false;
+      return this.describe();
+    } catch (e) {
+      this.error = e && e.message ? e.message : String(e);
+      this.loading = false;
+      this.engine.reset();
+      this.host.clearModel();
+      this.safeBox = null;
+      this.bgGroup = null;
+      this._clearClick();
+      throw e;
+    }
+  }
+
   /* 项目配置 → def 的合并由 PluginEngine.register 完成（见 engine/project-config.js），
      这里只负责把项目数据交给引擎（load 里 setProjectConfig） */
 
@@ -181,14 +247,14 @@ export class PluginPreview {
   }
 
   _mainDomain(def) {
-    /* 门窗的开合状态来自字段（binary_sensor 门磁 / 开度），不绑主实体 */
-    if (def.kind === 'opening') return 'binary_sensor';
+    /* 门/窗（贴墙设备）的开合状态来自字段（binary_sensor 门磁 / 开度），不绑主实体 */
+    if (isWallType(def && def.type)) return 'binary_sensor';
     return TYPE_DOMAIN[def.type] || 'switch';
   }
 
-  /** 构造预览实例数据（等价于 ha-3d-home 里一台设备 / 一扇门窗的 obj） */
+  /** 构造预览实例数据（等价于 ha-3d-home 里一台设备 / 一扇门的 obj） */
   _makeObj(def, style) {
-    const isOpening = def.kind === 'opening';
+    const isWall = isWallType(def.type);
     const mainDomain = this._mainDomain(def);
     const obj = {
       id: 'preview',
@@ -196,21 +262,29 @@ export class PluginPreview {
       pct: 100,
       style: style ? style.id : 'default',
       styleOpts: {},
-      /* 设备类可以绑一台真实设备（设置里填）；门窗类没有这个概念，稍后指向门磁字段 */
-      entityId: isOpening
+      /* 设备可以绑一台真实设备（设置里填）；门/窗没有这个概念，稍后指向门磁字段 */
+      entityId: isWall
         ? ''
         : (((this.project && this.project.plugin && this.project.plugin.entityId) || '').trim()
           || `${mainDomain}.preview_main`),
       swing: 1.1,
     };
-    if (isOpening) {
+    if (isWall) {
+      /* 洞口宽度：窗缺省 1.2m、门 0.9m（与 home 的兜底一致） */
       obj.w = def.type === 'window' ? 1.2 : 0.9;
-    } else if (style && style.z != null) {
+    }
+    /* 离地高度：门恒 0（贴地不可调）；窗与设备读样式 z */
+    if (def.type !== 'door' && style && style.z != null) {
       obj.z = Number(style.z) || 0;
     }
 
-    /* fields 声明的拓展实体：插件里通过 ctx.field('xxx') 读，值就是 entity id */
-    const fields = (def.fields && def.fields.length) ? def.fields : ((this.project && this.project.fields) || []);
+    /* fields 声明的拓展实体：插件里通过 ctx.field('xxx') 读，值就是 entity id。
+     * 结构 = 代码 def.fields ∪ 项目配置 fields（面板后加的字段没进代码也能生效） */
+    const defFields = (def.fields && def.fields.length) ? def.fields : [];
+    const projFieldList = ((this.project && this.project.fields) || [])
+      .filter((f) => f && f.key);
+    const seenKeys = new Set(defFields.map((f) => f && f.key));
+    const fields = defFields.concat(projFieldList.filter((f) => f && f.key && !seenKeys.has(f.key)));
     fields.forEach((f) => {
       if (!f || !f.key) return;
       if (f.key === 'entityId') return;   // 主实体已单独给
@@ -223,10 +297,10 @@ export class PluginPreview {
       if (f && f.key && f.entityId) obj[f.key] = f.entityId;
     });
 
-    /* 门窗类没有「实体绑定」—— 状态全部来自字段（门磁 / 开门比例）。
-       不再造 binary_sensor.preview_main 这种假主实体；把 entityId 指向门磁字段，
+    /* 门/窗没有「实体绑定」—— 状态全部来自字段（门磁 / 开门比例）。
+       不造 binary_sensor.preview_main 这种假主实体；把 entityId 指向门磁字段，
        让按官方写法（ctx.obj.entityId）写的插件也能跑，但界面上不出现「主实体」。 */
-    if (isOpening) {
+    if (isWall) {
       const door = fields.find((f) => f && f.key && OPENING_MAIN_RE.test(f.key))
         || fields.find((f) => f && Array.isArray(f.domains) && f.domains.includes('binary_sensor'))
         || null;
@@ -238,12 +312,12 @@ export class PluginPreview {
   _fieldDomain(def, field) {
     const doms = Array.isArray(field.domains) ? field.domains : [];
     if (doms.length) return doms[0];
-    if (def.kind === 'opening') return 'binary_sensor';
+    if (isWallType(def.type)) return 'binary_sensor';
     return 'sensor';
   }
 
   _defineEntities(def, obj) {
-    /* 主实体：门窗可能没有（entityId 为空），空串别往状态表里塞 */
+    /* 主实体：门/窗可能没有（entityId 为空），空串别往状态表里塞 */
     if (obj.entityId) this.ha.define(obj.entityId);
     /* 拓展实体 */
     this.engine.fieldsOf(def).forEach((f) => {
@@ -251,7 +325,8 @@ export class PluginPreview {
       if (eid) this.ha.define(eid);
     });
     (this.project && this.project.fields || []).forEach((f) => {
-      const eid = f && obj[f.key];
+      if (!f || !f.key) return;
+      const eid = obj[f.key];
       if (eid) this.ha.define(eid);
     });
   }
@@ -262,12 +337,12 @@ export class PluginPreview {
   listEntities() {
     const def = this.def;
     const main = this.obj ? this.obj.entityId : '';
-    /* 门窗类没有「实体绑定」，entityId 只是指向门磁字段的别名，不标成主实体 */
-    const isOpening = !!(def && def.kind === 'opening');
+    /* 门/窗没有「实体绑定」，entityId 只是指向门磁字段的别名，不标成主实体 */
+    const isWall = !!(def && isWallType(def.type));
     const out = [];
     (this.ha.list() || []).forEach((e) => {
       let role = 'field';
-      if (main && e.entityId === main && !isOpening) role = 'main';
+      if (main && e.entityId === main && !isWall) role = 'main';
       let label = '';
       let fieldKey = '';
       let fieldTip = '';
@@ -305,12 +380,27 @@ export class PluginPreview {
 
   /* ---------------- 点击控制（设备/标签 → 切实体状态，口径同 ha-3d-home） ---------------- */
 
+  /* 设备类离地高度：把实例 group 整体抬到 obj.z（米）。与 home 的 devY 口径一致：
+   * 门恒 0（_makeObj 不给 door 设 z）、窗/设备读样式 z（obj.z 已在 _makeObj 算好）。
+   * 标签锚点（host.bounds 按世界坐标）与点击拾取网格都基于世界矩阵，抬高后自动跟着走。 */
+  _applyGroundLift(group) {
+    if (!group || !this.def || this.def.kind !== 'device' || !this.obj) return;
+    group.position.y = Number(this.obj.z) || 0;
+  }
+
+  /* 类型键：优先插件声明的 type（HA 域或 door/window），缺省回退插件 id
+     —— 引擎的 styles/defFor/isOnOf 都按这个键查 */
+  _typeKey() {
+    const d = this.def;
+    return (d && (d.type || d.id)) || '';
+  }
+
   /** 载入成功后调用：算 click 规格、收集可点网格、算标签锚点 */
   _setupClick(def, group) {
     this._clearClick();
     this._clickRoot = group || null;
     if (!def || def.kind !== 'device' || !group) return;
-    const spec = this.engine.clickSpec(def.id, this.styleId);
+    const spec = this.engine.clickSpec(this._typeKey(), this.styleId);
     if (!spec || spec.defaultOn === false) return;
     this._clickSpec = spec;
     group.traverse((n) => { if (n.isMesh) this._clickMeshes.push(n); });
@@ -330,25 +420,53 @@ export class PluginPreview {
     return !!this.host.pickAt(e.clientX, e.clientY, this._clickMeshes);
   }
 
-  /** 当前是否「开着」：插件 click.isOn 优先，缺省 state 非 off/unavailable 即开 */
+  /** 当前是否「开着」——**唯一判定入口**（与 home 的 HA.deviceIsOn 同口径）：
+   *   ① 插件顶层 isOn(obj, get)（多实体组合；返回 null = 不判定）
+   *   ② 默认规则：主实体 on/open（mock-ha 的 isOn）
+   *  3D 标签高亮、2D 平面填充、点击发 on 还是 off 全用这一个结论。 */
   isOnNow() {
-    const spec = this._clickSpec;
-    const st = this.obj && this.obj.entityId ? this.ha.getState(this.obj.entityId) : null;
-    if (spec && spec.isOn) return !!spec.isOn(st);
-    return !!(st && st.state && st.state !== 'off' && st.state !== 'unavailable');
+    if (!this.def || !this.obj) return false;
+    const read = (eid) => this.ha.getState(eid);
+    const byPlugin = this.engine.isOnOf(this._typeKey(), this.styleId, this.obj, read);
+    if (byPlugin != null) return byPlugin;
+    const eid = this.obj.entityId;
+    return eid ? !!this.ha.isOn(eid) : false;
   }
 
-  /** 点击切换：按 click.on/off 服务名改主实体状态 → HA 推送 → update() 重渲染 */
+  /** 点击切换：按 click.on/off 服务名改主实体状态 → HA 推送 → update() 重渲染。
+   *  on/off 为插件声明的自定义函数时（与 home 引擎同口径）：方向仍由 isOnNow 驱动，
+   *  函数拿注入的 mock api 自由执行 —— call(dom,svc,data) 按「服务名 → mock 状态」落地
+   *  （data.entity_id 可指向任意已定义实体），get(eid) 读状态，toast 走 console；
+   *  同步抛错 / Promise 拒绝都拦住，函数形态不受「必须绑主实体」限制。 */
   toggleDevice() {
     const spec = this._clickSpec;
-    if (!spec || !this.obj || !this.obj.entityId) return null;
+    if (!spec || !this.obj) return null;
     const onNow = this.isOnNow();
     const svc = onNow ? spec.off : spec.on;
-    /* studio 里 mock-ha 直接吃状态值：服务名 → 状态映射（toggle = 翻转） */
+    /* 服务名 → mock-ha 状态映射（toggle = 翻转），字符串与函数两条路共用 */
     const MAP = { turn_off: 'off', turn_on: 'on', close: 'closed', close_cover: 'closed', open_cover: 'open' };
-    const next = svc === 'toggle' ? (onNow ? 'off' : 'on')
-      : MAP[svc] || (/off|close/.test(svc) ? 'off' : 'on');
-    return this.setEntity(this.obj.entityId, next);
+    const toState = (s, cur) => (s === 'toggle' ? (cur ? 'off' : 'on') : MAP[s] || (/off|close/.test(s) ? 'off' : 'on'));
+    if (typeof svc === 'function') {
+      const api = {
+        obj: this.obj,
+        call: (domain, service, data) => {
+          const eid = (data && data.entity_id) || this.obj.entityId;
+          if (!eid || !this.ha.has(eid)) return Promise.resolve(null);
+          return this.setEntity(eid, toState(service, !!this.ha.isOn(eid)));
+        },
+        get: (eid) => this.ha.getState(eid),
+        toast: (msg) => { try { console.log('[预览]', String(msg)); } catch (e) { /* 忽略 */ } },
+      };
+      try {
+        return Promise.resolve(svc.call(null, this.obj, api))
+          .catch((e) => console.warn('[预览] click 函数执行失败:', e && e.message ? e.message : e));
+      } catch (e) {
+        console.warn('[预览] click 函数执行失败:', e && e.message ? e.message : e);
+        return null;
+      }
+    }
+    if (!this.obj.entityId) return null;
+    return this.setEntity(this.obj.entityId, toState(svc, onNow));
   }
 
   /** 标签当前该显示什么 / 在哪（PluginStage 每帧取一次去更新 DOM） */
@@ -356,6 +474,8 @@ export class PluginPreview {
     const def = this.def;
     const obj = this.obj;
     if (!def || !obj || def.kind !== 'device' || !this._clickSpec) return null;
+    /* 标签开关由注册时的 labels 决定（门/窗缺省不显示，要显示需插件 labels:true） */
+    if (!this.engine.wantsLabel(this._typeKey(), this.styleId)) return null;
     const box = this.host.bounds();          // 每帧实时取：包围盒会随动画/光效变化
     if (!box) return null;
     const st = obj.entityId ? this.ha.getState(obj.entityId) : null;
@@ -368,7 +488,10 @@ export class PluginPreview {
        labelOffset 语义：标签相对「设备模型接地面」的距地高度（米，等同 ha-3d-home 的 labelOffset）；
        造型没声明时退回包围盒顶面，保证标签默认落在模型上方而不是插在模型里。
        （包围盒每帧现取：会随动画/光效变化） */
-    const s = this.engine.styleOf(def.id, this.styleId);
+    /* 标签高度读当前样式的 live 引用（this.style，= def.styles 里那条）：
+       不能走 engine.styleOf —— 它带查询缓存且返回快照拷贝，左下卡片即时改的
+       labelOffset（PluginStage.applyStyleMetaToPreview 写 live 对象）在缓存拷贝上看不到 */
+    const s = this.style;
     const decl = s && s.labelOffset != null && s.labelOffset !== '' ? Number(s.labelOffset) : null;
     const anchorY = decl != null && isFinite(decl) ? box.min.y + decl : box.max.y;
     const sp = this.host.projectToScreen({
@@ -398,21 +521,18 @@ export class PluginPreview {
   /** 插件声明的 plan2d 包装器；没写返回 null（调用方用兜底符号） */
   planSymbol() {
     if (!this.def) return null;
-    return this.engine.planOf(this.def.id, this.styleId, this.obj);
+    return this.engine.planOf(this._typeKey(), this.styleId, this.obj);
   }
 
   hasPlan2d() {
-    return !!(this.def && this.engine.hasPlan(this.def.id));
+    /* 直接看当前 def：preview 一次只跑一个插件，按 type 查可能命中同类型的别的定义 */
+    return !!(this.def && typeof this.def.plan2d === 'function');
   }
 
-  /** 平面上「现在是不是开着」：插件 isOn(obj, get) 优先，缺省主实体 on/open 即开 */
+  /** 平面上「现在是不是开着」：与 3D 标签 / 点击方向共用 isOnNow() 的结论
+   *  （插件 isOn → 默认规则；2D 填充色不再单独维护一套判定） */
   planOn() {
-    if (!this.def || !this.obj) return false;
-    const get = (eid) => this.ha.getState(eid);
-    const byPlugin = this.engine.isOnOf(this.def.id, this.obj, get);
-    if (byPlugin != null) return byPlugin;
-    const st = this.obj.entityId ? get(this.obj.entityId) : null;
-    return !!(st && (st.state === 'on' || st.state === 'open'));
+    return this.isOnNow();
   }
 
   /** plan2d 绘制需要的全部上下文（PlanInset 画线稿时直接拿去用） */

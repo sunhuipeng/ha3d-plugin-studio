@@ -12,11 +12,9 @@ const {
 } = require('./config');
 const { buildAll, validate } = require('./generator');
 const JSZip = require('jszip');
-const { diffSnapshot, driftOut, recordSnapshot } = require('./config-snapshot');
 const { prepareExportZip, buildProjectZip } = require('./plugin-pkg');
 const { fixGlbMaterials } = require('./fixglb');
 const { splitGlb, splitGlbOne } = require('./split-glb');
-
 const api = express.Router();
 
 /* 删除: 优先 rmSync；部分环境（如 WorkBuddy 沙箱）拦截 rm，降级 rename 到 .deleted-* 隐藏目录 */
@@ -116,41 +114,6 @@ api.get('/projects/:id', (req, res) => {
 api.put('/projects/:id', (req, res) => {
   const proj = req.body.project || req.body;
   if (!proj || proj.id !== req.params.id) return res.status(400).json({ error: 'project id mismatch' });
-  /* 配置快照只能走 /snapshot 接口改：前端保存时不该把它覆盖掉（否则 MCP 刚记的快照会被编辑页旧内存抹掉） */
-  if (!proj.snapshot) {
-    try { proj.snapshot = readProject(req.params.id).snapshot; } catch (e) { /* 新项目没有就没有 */ }
-  }
-  writeProject(req.params.id, proj);
-  res.json({ ok: true });
-});
-
-/* ---- 配置快照（属性 / 字段 / 样式） ---- */
-api.get('/projects/:id/snapshot', (req, res) => {
-  let proj;
-  try { proj = readProject(req.params.id); }
-  catch (e) { return res.status(404).json({ error: 'project not found' }); }
-  const d = diffSnapshot(proj);
-  res.json({ ok: true, ...driftOut(d), snapshot: d.snapshot, codeChanged: d.codeChanged });
-});
-
-api.put('/projects/:id/snapshot', (req, res) => {
-  try {
-    const { before, snapshot } = recordSnapshot(req.params.id, (req.body && req.body.label) || '');
-    res.json({
-      ok: true,
-      snapshot: { at: snapshot.at, label: snapshot.label, version: snapshot.version },
-      replaced: before.hasSnapshot,
-      replacedAt: before.snapshot ? before.snapshot.at : '',
-      changesSincePrevious: before.changes,
-    });
-  } catch (e) { return res.status(404).json({ error: 'project not found' }); }
-});
-
-api.delete('/projects/:id/snapshot', (req, res) => {
-  let proj;
-  try { proj = readProject(req.params.id); }
-  catch (e) { return res.status(404).json({ error: 'project not found' }); }
-  delete proj.snapshot;
   writeProject(req.params.id, proj);
   res.json({ ok: true });
 });
@@ -331,7 +294,7 @@ api.get('/projects/:id/build', (req, res) => {
 const { publishProject } = require('./plugin-pkg');
 
 /* 导出插件包：和远程安装（发布）同一份打包流程（prepareExportZip），直接下载到本地（不改版本号、不落盘）。
- * 配置有 error 级问题返回 400 + warnings；配置漂移通过响应头带出去（前端据此提醒重新生成） */
+ * 配置有 error 级问题返回 400 + warnings */
 api.get('/projects/:id/export', async (req, res) => {
   let r;
   try { r = await prepareExportZip(req.params.id); }
@@ -340,12 +303,9 @@ api.get('/projects/:id/export', async (req, res) => {
     if (e.code === 'INVALID') return res.status(400).json({ error: e.message, warnings: e.warnings });
     return res.status(500).json({ error: e.message });
   }
-  const { proj, built, buf, drift } = r;
+  const { proj, built, buf } = r;
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${proj.id}-v${built.manifest.version}.zip"`);
-  res.setHeader('X-Config-Drift', drift.stale ? '1' : '0');
-  res.setHeader('X-Config-Drift-Count', String(drift.changeCount));
-  res.setHeader('X-Config-Drift-Summary', encodeURIComponent((drift.summary || []).join(' | ')));
   res.send(buf);
 });
 
@@ -367,8 +327,8 @@ api.post('/projects/:id/publish', async (req, res) => {
   const pid = req.params.id;
   if (!safeId(pid)) return res.status(400).json({ error: 'project id invalid' });
   try {
-    const { manifest, copied, remote, drift } = await publishProject(pid, !!req.body.bump);
-    res.json({ ok: true, host: remote.host, pluginId: manifest.id, manifest, copied, drift });
+    const { manifest, copied, remote } = await publishProject(pid, !!req.body.bump);
+    res.json({ ok: true, host: remote.host, pluginId: manifest.id, manifest, copied });
   } catch (e) {
     if (e.code === 'NOT_FOUND') return res.status(404).json({ error: 'project not found' });
     if (e.code === 'INVALID') return res.status(400).json({ error: e.message, warnings: e.warnings });

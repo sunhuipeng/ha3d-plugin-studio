@@ -3,7 +3,7 @@
    下面是给 AI 的正文。点统揽里的任意名称即可复制，写提示词时不用来回翻别的面板。
    正文存在 proj.aiPrompt，MCP 的 studio_get_project 会带出去。 */
 import { computed, ref } from 'vue';
-import { S, scheduleSave, toast } from '../../store';
+import { S, scheduleSave, toast, engineList, engineFieldList } from '../../store';
 import { fieldTypeLabel, normalizeEnumValues, normalizeFieldType } from '../../field-schema';
 
 const prompt = computed({
@@ -14,8 +14,8 @@ const prompt = computed({
 const len = computed(() => (prompt.value || '').length);
 
 const plugin = computed(() => (S.proj && S.proj.plugin) || {});
-const fields = computed(() => (S.proj && S.proj.fields) || []);
-const styles = computed(() => (S.proj && S.proj.styles) || []);
+const fields = computed(() => engineFieldList());
+const styles = computed(() => engineList());
 const models = computed(() => S.models || []);
 
 /* 统揽分组默认全展开；点标题可收起（状态只在本面板内有效） */
@@ -54,6 +54,9 @@ const attrRows = computed(() => {
   if (p.entityId) rows.push({ k: '设备实体', v: p.entityId });
   return rows.filter((r) => r.v);
 });
+
+/* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
+const LOCK = computed(() => S.lock.locked);
 </script>
 
 <template>
@@ -178,7 +181,7 @@ const attrRows = computed(() => {
       <span class="blk-sub">写给 AI 的开发要求：这个插件要做什么、按什么规则判断、别动哪些东西。保存在项目里，不会直接参与代码生成（MCP studio_get_project 会带给 AI 当开发依据）。</span>
     </div>
 
-    <el-input v-model="prompt" type="textarea" class="prompt-box" resize="vertical"
+    <el-input :disabled="LOCK" v-model="prompt" type="textarea" class="prompt-box" resize="vertical"
       :autosize="{ minRows: 9, maxRows: 24 }"
       placeholder="例如：
 · 这是一个卷帘门插件，门磁 off 时无论比例多少都保持关闭

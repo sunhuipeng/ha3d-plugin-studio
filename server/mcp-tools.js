@@ -4,10 +4,11 @@
  * 造型、模型、实体绑定、状态判断全部写在 plugin.js 里，AI 读代码就知道全部信息。
  *
  * 工具按域拆在 server/mcp/ 下（详见 mcp/helpers.js 头注释）：
- *   0a. studio_get_project    一站式读全部配置（属性/字段/样式/部件/提示词/快照状态）——开工第一步
- *   0b. studio_snapshot       配置快照：记录/对比/清除「属性+字段+样式」，发布前对账用
+ *   0a. studio_get_project    一站式读全部配置（属性/字段/样式/部件/提示词）——开工第一步
  *   1.  studio_get_code       读代码（唯一的信息入口）
  *   2.  studio_write_code     改完提交：语法体检 → 落盘 → 前端清空旧渲染并重建
+ *   2b. studio_sync_config    写 styles / fields：清单整表替换前端 tab 数据 + 落盘 project.json（以清单为准）
+ *   2c. studio_render         立刻重新渲染（重跑代码 + 按当前配置合并，不写盘）
  *   3.  studio_view           摆姿态：转/移模型、转/平移/缩放相机（先调好再看）
  *   4.  studio_screenshot     按指定角度出图
  *   5.  studio_set_entity     给绑定实体推状态，验证「状态变化 → 造型变化」
@@ -24,6 +25,9 @@
  *   16. studio_set_option     样式参数调节：改 options[].def → 重渲，供 AI 自动核验参数效果
  *   17. studio_where          当前页面在哪：启动页 / 某项目编辑页（项目页返回 projectId）
  *   18. studio_single_window  单窗口收敛：只保留一个标签页，多余的让前端自己关掉
+ *   19. studio_lock_config    锁用户左侧面板（纯前端只读，刷新即解锁）
+ *   20. studio_unlock_config  解除左侧面板只读
+ *   21. studio_get_lock       查前端锁状态（是否只读 / 谁锁的）
  *
  * 项目 id 可省略：自动使用当前唯一打开了编辑页的项目。
  * 每次调用都会向前端广播 { type:'mcp', event:'activity' }，顶部横条提示（wrapToolActivity 统一做）。
@@ -37,6 +41,7 @@ const toolsPreview = require('./mcp/tools-preview');
 const toolsProjects = require('./mcp/tools-projects');
 const toolsModels = require('./mcp/tools-models');
 const toolsPublish = require('./mcp/tools-publish');
+const toolsLock = require('./mcp/tools-lock');
 
 function buildMcpServer() {
   const server = new McpServer({ name: 'ha3d-plugin-studio', version: '0.4.0' });
@@ -47,6 +52,7 @@ function buildMcpServer() {
   toolsProjects.register(server);   // 项目：列表 / 页面定位 / 单窗口 / 切换项目
   toolsModels.register(server);     // 模型：上传 / 导出 / 列表 / 拆分 / 删改 / 材质修复
   toolsPublish.register(server);    // 发布：导出 zip / 远程安装
+  toolsLock.register(server);       // 配置锁：加锁 / 解锁 / 查状态（人机互斥编辑）
 
   return server;
 }

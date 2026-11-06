@@ -1,17 +1,18 @@
 {
   "name": "ha3d-plugin-studio",
   "version": "1.0.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "description": "图形化 ha-3d-home 插件生成器（GLB 组装 + AI 逻辑生成）",
   "scripts": {
     "start": "node server/index.js",
+    "pack:image:arm64": "bash scripts/pack-image.sh linux/arm64",
     "mcp:smoke": "node scripts/mcp-smoke.cjs",
     "client:dev": "npm --prefix client run dev",
     "client:build": "npm --prefix client run build",
     "build": "npm --prefix client run build && node server/index.js",
     "pack:image": "bash scripts/pack-image.sh",
-    "pack:image:amd64": "bash scripts/pack-image.sh linux/amd64",
-    "pack:image:arm64": "bash scripts/pack-image.sh linux/arm64"
+    "pack:image:amd64": "bash scripts/pack-image.sh linux/amd64"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

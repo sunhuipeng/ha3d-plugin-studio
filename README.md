@@ -2,9 +2,11 @@
 
 图形化的 [ha-3d-home](../ha-3d-home) 3D 插件开发台：在浏览器里创建插件项目、装配模型、绑定实体、实时预览，并通过内置 **MCP Server** 让 AI 助手（如 WorkBuddy）全流程读写与验证——从一句话需求到可安装的插件压缩包。
 
+配套的 WorkBuddy 技能（已整理为独立仓库，持续维护）：**<https://gitee.com/sunhuip/ha3d-skill.git>**
+
 ## 核心能力
 
-### 1. MCP 能力（26 个工具）
+### 1. MCP 能力（30 个工具）
 
 服务内置 MCP Server（SSE 传输），连接地址：
 
@@ -12,26 +14,20 @@
 http://localhost:8098/mcp/sse
 ```
 
-在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。工具分四组：
+在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。工具一览（按用途排列）：
 
 **配置读取**
 
-| 工具 | 说明 |
+| 能力 | 说明 |
 | --- | --- |
 | `studio_get_project` | 一站式读取全部配置（属性 / 字段 / 样式 / 部件 / 提示词 / 快照状态），开工第一步 |
-| `studio_snapshot` | **配置快照**：把当前的属性（settings）、字段（fields）、样式（styles）复制进 `project.snapshot`。默认记录，`compareOnly` 只对比，`clear` 删除。发布 / 导出前对账，配置改过就提醒重新生成 |
-
-**插件代码**
-
-| 工具 | 说明 |
-| --- | --- |
 | `studio_get_code` | 读自定义代码（唯一的信息入口） |
 | `studio_write_code` | 提交代码：语法体检 → 落盘 → 前端实时重建渲染 |
-
-**项目管理与视觉验证**
-
-| 工具 | 说明 |
-| --- | --- |
+| `studio_sync_config` | **配置写入**：传最终版 `styles` / `fields` 清单 → 整表替换前端样式 / 字段 tab 的数据 + 落盘 `project.json`，传什么就是什么。不合并、不留删除标记：清单里没有的旧条目即删除（代码里仍声明也不会复活）。落盘是主目标：页面重渲染失败也照样写入（原因在 `hint` / `warn`）。返回 `diff`（落盘前后增删）+ `parity`（tab 实际值 vs 磁盘 JSON）。未传的维度（只传 styles 时）保持不动 |
+| `studio_lock_config` | **锁定配置（人机互斥）**：编辑页左侧浮层里的输入控件转只读，避免 AI 改配置的同时用户手改互相覆盖；纯前端状态，用户刷新页面即自动解锁。可选 `note` 说明锁的用途 |
+| `studio_unlock_config` | 解锁配置，把编辑权交还用户 |
+| `studio_get_lock` | 查当前锁状态（是否锁着、谁锁的） |
+| `studio_render` | 立刻重新渲染：重跑插件代码 + 按当前配置合并后重建场景，返回样式 / 实体 / 参数实际取值。只重渲不写盘；`refreshConfig:true` 先从服务器重读配置，`view` 可套用视角预设 |
 | `studio_list_projects` | 列出所有项目（id / 名称 / 类型 / 模型数） |
 | `studio_where` | 当前编辑页停在哪：启动页（`page:"home"`）/ 项目编辑页（返回 `projectId`）/ 没打开页面（`"none"`），判断依据是 URL 路由 `#/project/<id>`；`tabs` 列出每个标签页的 `clientId` / 可见 / 聚焦 |
 | `studio_single_window` | **单窗口收敛**：同时开着多个标签页时，MCP 操作会在它们之间乱跳。先问一遍所有连接「谁可见/有焦点」，挑一个保留（有焦点 > 可见 > 最近连上，可用 `keepClientId` 指定，`projectId` 限定范围），其余前端收到关闭指令后自动断开中继并关掉页面；不认指令的旧页面由服务端兜底断开。`dryRun` 只列计划 |
@@ -51,11 +47,6 @@ http://localhost:8098/mcp/sse
 | `studio_fix_model_materials` | 修复 GLB 材质发黑（sRGB 未转 / metallic 偏高 /  roughness 偏低 / 压暗扩展）；**原地改写不留备份**（幂等可反复跑），`dryRun` 只体检 |
 | `studio_get_runtime` | 运行期体检：渲染错误、当前样式与参数实际取值、实体状态、引擎实例数、浏览器控制台报错（含被引擎吞掉的 `update` 异常） |
 | `studio_reload` | 刷新编辑页（加载新构建） |
-
-**交付**
-
-| 工具 | 说明 |
-| --- | --- |
 | `studio_export_project` | 导出插件压缩包（zip 以 base64 放在返回的 `zipBase64` 字段，不落盘、不改版本号）。返回里的 `configDrift` 是「配置 vs 快照」的差异（不阻断导出） |
 | `studio_publish_project` | 发布到 ha-3d-home（远程安装 + 版本号写回）。返回里的 `configDrift` 同上 |
 
@@ -64,17 +55,37 @@ http://localhost:8098/mcp/sse
 
 ### 2. 接入 WorkBuddy 快速零代码开发
 
-配合 WorkBuddy 技能 **`ha3d-plugin-dev`**，用自然语言一句话即可生成插件（如「用 ha3d-plugin-dev 技能开发一个落地灯插件」）。技能内化的五步流程：
+配合 WorkBuddy 技能 **`ha3d-plugin-studio`**，用自然语言一句话即可生成插件（如「用 ha3d-plugin-studio 技能开发一个落地灯插件」）。技能内化的流程：
 
-1. **拉取配置** —— `studio_get_project` 拿属性 / 字段 / 样式 / 部件 / 提示词（`aiPrompt` 为用户需求，必读）；
-2. **阅读参考** —— 读 ha-3d-home 的 `PLUGIN-DEV.md`（ctx API 权威口径）与同类插件源码，资料不足会弹窗向用户补问；
-3. **开发代码** —— 写单文件 `plugin.js` 并 `studio_write_code` 提交（服务端先做语法体检）；
-4. **验证效果** —— `studio_set_entity` 构造实体状态覆盖边界，`studio_set_option` 调样式参数（如亮度）并回读实际生效值，`studio_screenshot` 截图确认形态与动画；
-5. **收尾** —— `studio_snapshot` 记录配置快照（属性 + 字段 + 样式），汇报改动与验证结果，可选 `studio_publish_project` 直接发布。
+1. **环境检查 + 锁定项目** —— 确认 MCP 在线、编辑页停在项目编辑页，然后 `studio_lock_config` 把左侧面板转为只读，避免 AI 改配置与用户手改互相覆盖（纯前端状态，刷新页面即解锁）；
+2. **拉取配置与代码** —— `studio_get_project` 拿属性 / 字段 / 样式 / 部件 / 提示词（`aiPrompt` 为用户需求，必读）+ `studio_get_code`；多轮迭代可基于对话内记忆，出现「用户手改过 / 验证结果不符」等情况必须重拉；
+3. **阅读参考** —— 读 ha-3d-home 的 `PLUGIN-DEV.md`（ctx API 权威口径）与同类插件源码，资料不足会弹窗向用户补问；
+4. **配置项规划与同步** —— 需要新增 / 调整样式、字段时，**先用 `studio_sync_config` 把配置覆盖到服务端与前端**，再按新配置写代码（引擎渲染时配置会覆盖代码声明，不同步则验证结论不可信）；
+5. **生成代码** —— 写单文件 `plugin.js` 并 `studio_write_code` 提交（服务端先做语法体检）；
+6. **验证效果** —— `studio_set_entity` 构造实体状态覆盖边界，`studio_set_option` 调样式参数（如亮度）并回读实际生效值，`studio_screenshot` 截图确认形态与动画；
+7. **解锁 + 收尾** —— `studio_unlock_config` 交还编辑权，汇报改动与验证结果，可选 `studio_publish_project` 直接发布（配置漂移由前端在发布时自动检测确认）。
 
 整个过程无需手写一行代码，模型上传、样式参数、实体绑定都在 studio 界面或 MCP 工具中完成。
 
-技能包随仓库提供：`skill/ha3d-plugin-dev/`，复制到 `~/.workbuddy/skills/` 即可安装，详见 [`skill/README.md`](skill/README.md)。
+#### 技能包获取与安装
+
+技能已经整理成独立仓库，**以该仓库为准**（持续维护，跟着本项目的 MCP 工具与流程迭代）：
+
+```bash
+git clone https://gitee.com/sunhuip/ha3d-skill.git
+```
+
+- **仓库地址**：<https://gitee.com/sunhuip/ha3d-skill.git>
+- **安装**：把仓库目录放到 WorkBuddy 的技能目录即可（详见仓库内的 `README.md` 安装说明，含前置条件、三种安装方式、验证步骤与排查表）：
+
+  ```bash
+  rsync -a --exclude '.git' --exclude '.DS_Store' \
+    ha3d-skill/ ~/.workbuddy/skills/ha3d-plugin-studio/
+  ```
+
+- 技能**不在本仓库内维护**（早期的 `skill/` 导出副本已迁出），请直接使用上面的仓库，避免两边版本分叉。
+
+> **说明**：借助 AI Agent 开发模型插件的最终质量，很大程度上取决于提示词（需求描述）的质量——描述得越具体（设备类型、样式细节、参数期望、验证要点），产出越贴近预期；反之则可能需要多轮修正。效果因人而异，属于正常现象。
 
 ### 3. 配置快照与「重新生成」提醒
 
@@ -90,16 +101,17 @@ http://localhost:8098/mcp/sse
 AI 生成的 `plugin.js` 里常把 `styles` / `options` 写死（生成那一刻的快照）。studio **不把它当依据**：
 
 - **预览**：`PluginEngine.register()` 注册时，用项目的 `styles` / `fields` 覆盖代码里的同名字段（`client/src/engine/project-config.js`）。样式按 id 对齐，代码里同 id 的条目只贡献函数（背景插件的 `style.apply` 是渲染主体）；项目完全没配时才退回代码里的。
-- **发布 / 导出**：打包时把同一份配置快照注进 `plugin.js`（`server/inject-config.js`）——在原代码外面包一层，执行期间拦截 `PluginEngine.register` 先合并配置再注册，安装端（ha-3d-home）无需改动。页面预览用的 `GET /api/projects/:id/build` 仍返回原始代码，所以代码面板里看到的就是项目里那份。
+- **发布 / 导出**：打包产物就是项目里那份原始代码（AI 输出什么样就打包什么样，**不包配置注入层**）。配置与代码的一致性由开发流程保障：AI 按快照照抄配置 + 面板改动后重新生成；页面预览用的 `GET /api/projects/:id/build` 同样返回原始代码，所以代码面板里看到的就是打包出来的那份。
 - **前提**：代码逻辑必须读 `ctx.options.<key>`（而不是写死常量），否则在面板/卡片里调参数不会影响画面。
 
-### 5. 三种插件类型
+### 5. 两种插件类型
 
 | kind | 典型设备 | 特点 |
 | --- | --- | --- |
-| `device` 设备 | 灯、开关、风扇、摄像头、传感器… | 实体状态驱动造型变化（亮灭 / 开关 / 巡视）；支持点击交互（click 配置）与悬浮状态标签；plan2d 绘制平面图标 |
-| `opening` 门窗 | 门、窗、卷帘门、窗帘… | 开合比例（0~100）驱动动画，`ctx.animate` 缓动；plan2d 按平面图惯例绘制（门洞 + 开启弧等） |
+| `device` 设备（**含门/窗**） | 灯、开关、风扇、摄像头、传感器…；门 / 窗用 `type: 'door'` / `'window'` | 实体状态驱动造型变化（亮灭 / 开关 / 巡视 / 开合）；支持点击交互（click 配置）与悬浮状态标签；plan2d 绘制平面图标。门/窗是「贴墙设备」：`kind` 同样是 `device`，只是 `type` 不同、默认不显示 3D 标签、门的离地高度固定 0 |
 | `background` 背景 | 草地、沙滩、马路、院子… | `apply(ctx)` 直接返回渲染好的 3D 内容（`{ group }`），不调用 model3d / plan2d；用「安全范围」长宽占位盒代替房屋体块，范围内禁止放置物品。`ctx.house` / `ctx.safe` 与 ha-3d-home 同口径：原点 = 背景中心，`offsetX/offsetZ`（房屋相对背景中心的偏移）先算进 house/safe，背景 group 再摆到「房屋中心 − 偏移」，占位盒钉在世界原点 |
+
+> **开/合判定只有一个入口**：插件在 register 顶层声明 `isOn(obj, get)`（设备与门/窗共用）。`click` 只描述「点下去发什么服务」（`on` / `off` / `label` / `defaultOn`），不再有 `click.isOn`。判定结果同时驱动 3D 标签高亮、2D 平面填充色与点击方向。
 
 ### 6. 离线打包与在线安装
 
@@ -170,7 +182,7 @@ npm run pack:image:arm64     # 给 ARM 服务器 / NAS 打包
 server/            Node 服务端（Express, 端口 8098）
   index.js         入口：静态托管 client/dist + API + WS + MCP(SSE)
   routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布）
-  mcp/             26 个 MCP 工具定义（按域拆分：config/preview/projects/models/publish + helpers）
+  mcp/             30 个 MCP 工具定义（按域拆分：config/preview/projects/models/publish/lock + helpers）
   mcp-tools.js     MCP 工具装配薄壳（把上面各域 register 进 server）
   mcp-sse.js       MCP SSE 传输
   ws-hub.js        WebSocket 中继（服务端 ↔ 浏览器编辑页）
@@ -184,7 +196,6 @@ data/
   projects/<id>/   每个插件项目：project.json + models/*.glb + preview.png
   config.json      远程发布目标（host + key）
 scripts/           mcp-smoke 冒烟测试 + pack-image.sh 离线镜像打包
-skill/             可安装的技能包 ha3d-plugin-dev/（SKILL.md + references + mcp-call.cjs）
 Dockerfile         多阶段构建：镜像内构建前端 → 轻量运行层（数据走 /data 卷）
 docker-compose.yml 单容器部署（8098 端口 + /data 挂载 + healthcheck）
 ```
@@ -192,4 +203,27 @@ docker-compose.yml 单容器部署（8098 端口 + /data 挂载 + healthcheck）
 ## 相关文档
 
 - ha-3d-home：`../ha-3d-home/README.md`（主项目）、`../ha-3d-home/PLUGIN-DEV.md`（插件 API 权威口径）
-- WorkBuddy 技能：`skill/ha3d-plugin-dev/`（五步开发流程 + MCP 工具完整清单 + 背景插件规范），安装见 [`skill/README.md`](skill/README.md)
+- **WorkBuddy 技能（独立仓库，以此为准）**：<https://gitee.com/sunhuip/ha3d-skill.git> —— 完整开发流程（环境检查 → 锁项目 → 拉配置/代码 → 配置项同步 → 生成代码并验证 → 解锁）+ MCP 30 个工具的完整清单 + 背景插件规范；安装见仓库内 `README.md`
+
+## 开源协议与更新维护
+
+### 开源协议
+
+本项目（含 ha3d-plugin-studio 与其配套主项目 ha-3d-home）基于 [PolyForm Noncommercial 1.0.0](LICENSE) 协议开源：
+
+- ✅ **免费使用**：个人使用、学习研究、兴趣爱好项目等一切非商业用途完全免费
+- ✅ **自由二次开发**：可以修改源码、基于本项目做二次开发、分发衍生版本
+- ❌ **禁止商用**：不可出售、出租、付费分发本项目或基于它的作品，不可付费托管 / SaaS 化，不可用于任何商业目的
+- ❌ **衍生项目同样禁止商用**：基于本项目二次开发的项目必须同样遵循本协议，也不能拿来卖钱或商用
+- 💼 **商用授权**：确有商业使用需求，请单独联系作者获得商业授权
+- 📋 **传递义务**：把本项目（或其衍生版本）提供给任何人时，必须同时附上本协议文本或其链接
+
+> 协议要点为便于快速理解的中文摘要，法律效力以 [LICENSE](LICENSE) 中的英文原文为准。
+
+### 更新与维护
+
+本项目由作者**提供思路与需求 + AI Agent 全程开发**完成。项目维护需要消耗 token（AI 开发成本），因此：
+
+- 在 token 充足的情况下会**持续维护**：修复 bug、跟进 ha-3d-home 引擎变化、打磨开发体验
+- 维护节奏取决于可用资源，不承诺固定排期
+- 欢迎提 Issue 反馈问题；按本协议提交的 PR 同样以非商业方式共享给所有用户

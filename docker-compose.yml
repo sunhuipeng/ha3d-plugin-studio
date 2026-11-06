@@ -18,8 +18,3 @@ services:
       #   Mac/Windows: http://host.docker.internal:8099
       #   Linux:       http://宿主机内网IP:8099
     mem_limit: 256m         # GLB 拆分/打包时会多吃一些内存
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8098/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3

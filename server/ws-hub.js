@@ -15,7 +15,7 @@
  *  服务端 → 前端:
  *    { type:'welcome', clientId, ts }
  *    { type:'tool', id, name, args }
- *    { type:'refresh', what:'models'|'snapshot', file? }
+ *    { type:'refresh', what:'models', file? }
  *    { type:'ask_presence' }                      ← 询问当前可见/聚焦状态（单窗口收敛前先问）
  *    { type:'close_extra', kept, reason }         ← 你不是被保留的窗口，自己关掉（前端会断开中继并关页面）
  */

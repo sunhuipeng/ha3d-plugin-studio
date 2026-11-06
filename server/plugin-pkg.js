@@ -12,7 +12,6 @@ const path = require('path');
 const JSZip = require('jszip');
 const { PROJECTS_DIR, safeId, readProject, writeProject, modelsDir, listModels, remoteTarget } = require('./config');
 const { buildAll, validate } = require('./generator');
-const { diffSnapshot } = require('./config-snapshot');
 
 /* 项目打包成内存 zip（proj.models 需已注入模型清单） */
 async function buildPluginZip(proj, built, projectId) {
@@ -48,18 +47,16 @@ async function buildProjectZip(projectId) {
   return buf;
 }
 
-/* 导出/发布共用前置：读项目 → 对账 → 注入 models → 校验 → 构建（含配置注入）→ 打包。
+/* 导出/发布共用前置：读项目 → 注入 models → 校验 → 构建 → 打包。
  * routes 的 /export、MCP 的 studio_export_project、publishProject 三处共用，保证
- * 「校验口径 + zip 内容 + drift 对账时点」完全一致。
- * 返回 { proj, built, buf, copied, drift, warnings }；项目不存在 throw code=NOT_FOUND，
+ * 「校验口径 + zip 内容」完全一致。
+ * 返回 { proj, built, buf, copied, warnings }；项目不存在 throw code=NOT_FOUND，
  * 配置有 error 级问题 throw code=INVALID（带 warnings），调用方自行转成各自的错误形态。 */
 async function prepareExportZip(projectId, { bump = false } = {}) {
   let proj;
   try { proj = readProject(projectId); }
   catch (e) { throw Object.assign(new Error('project not found'), { code: 'NOT_FOUND' }); }
 
-  /* 打包前先对账（此时 proj 尚未被注入 models / 改版本号，口径最干净） */
-  const drift = diffSnapshot(proj);
   /* 运行时注入 models：validate 的模型检查与打包都要用，不写回文件。
    * 注意必须先注入再 validate，否则「没有 GLB 模型」的警告恒误报 */
   proj.models = listModels(projectId);
@@ -72,17 +69,18 @@ async function prepareExportZip(projectId, { bump = false } = {}) {
     );
   }
 
-  /* 产物要拿去安装：把项目 styles/fields 快照注进 plugin.js（styles/fields 以项目为准） */
-  const built = buildAll(proj, bump, { inject: true });
+  /* 产物 = 项目原代码，原样打包（AI 输出什么样就打包什么样，不包任何注入层）；
+   * 配置与代码的一致性由「AI 按快照照抄 + 面板改动后重新生成」保障 */
+  const built = buildAll(proj, bump);
   const { buf, copied } = await buildPluginZip(proj, built, projectId);
-  return { proj, built, buf, copied, drift, warnings };
+  return { proj, built, buf, copied, warnings };
 }
 
 /* 完整发布流程：prepareExportZip → POST 到 ha-3d-home 安装接口。
  * 成功后把版本号写回项目 JSON（下次 bump 在此基础上 +1）。
- * 返回 { manifest, copied, remote, drift }；失败 throw Error（带可读信息）。 */
+ * 返回 { manifest, copied, remote }；失败 throw Error（带可读信息）。 */
 async function publishProject(projectId, bump) {
-  const { proj, built, buf, copied, drift } = await prepareExportZip(projectId, { bump: !!bump });
+  const { proj, built, buf, copied } = await prepareExportZip(projectId, { bump: !!bump });
   const remote = remoteTarget();
 
   const url = remote.host + '/api/plugins/install'
@@ -118,7 +116,7 @@ async function publishProject(projectId, bump) {
   delete proj.models;
   writeProject(projectId, proj);
 
-  return { manifest: built.manifest, copied, remote, drift };
+  return { manifest: built.manifest, copied, remote };
 }
 
 module.exports = { buildPluginZip, buildProjectZip, prepareExportZip, publishProject };

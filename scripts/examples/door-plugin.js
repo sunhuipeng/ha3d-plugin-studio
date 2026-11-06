@@ -2,7 +2,8 @@
  * 平开门插件（studio 示例，对齐项目 pabbe02e8 的实际配置）
  *
  * ── 这个项目里有什么 ─────────────────────────────────────────────
- *   设置      id=demo  name=门窗  kind=opening  type=door
+ *   设置      id=demo  name=门窗  kind=device  type=door
+ *             （门/窗是 device 类里的贴墙类型，不再有 kind:opening）
  *   字段      doorEntity     门磁     on/off
  *             opening_ratio  开门比例  0~100
  *   样式      ping「单开门」 parts: frame.glb + leaf.glb
@@ -123,7 +124,7 @@
   PluginEngine.register({
     id: 'demo',
     name: '门窗',
-    kind: 'opening',
+    kind: 'device',           // 门/窗与设备同为 device，靠 type 区分
     type: 'door',
     version: '1.0.0',
 

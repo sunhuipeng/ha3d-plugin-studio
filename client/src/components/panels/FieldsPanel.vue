@@ -1,6 +1,7 @@
 <script setup>
+import { computed } from 'vue';
 /* 面板：字段（插件级实体绑定，所有样式共用） */
-import { S, act, scheduleSave, ENTITY_DOMAINS } from '../../store';
+import { S, act, scheduleSave, ENTITY_DOMAINS, engineFieldList } from '../../store';
 import {
   FIELD_TYPES, normalizeEnumValues, normalizeFieldType, suggestEnumTags,
 } from '../../field-schema';
@@ -39,29 +40,32 @@ function enumOptions(f) {
   for (const v of used) if (!out.includes(v)) out.push(v);
   return out;
 }
+
+/* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
+const LOCK = computed(() => S.lock.locked);
 </script>
 
 <template>
   <section class="tabpage">
-    <div v-for="(f, i) in S.proj.fields" :key="i" class="ed-row">
+    <div v-for="(f, i) in engineFieldList()" :key="i" class="ed-row">
       <label>标签
-        <el-input clearable v-model="f.label" placeholder="如 门磁" @input="scheduleSave()" />
+        <el-input :disabled="LOCK" clearable v-model="f.label" placeholder="如 门磁" @input="scheduleSave()" />
       </label>
       <label>key
-        <el-input clearable v-model="f.key" placeholder="如 doorEntity" @input="scheduleSave()" />
+        <el-input :disabled="LOCK" clearable v-model="f.key" placeholder="如 doorEntity" @input="scheduleSave()" />
       </label>
       <label class="wide">domains（实体域，可多选；留空 = 不限）
-        <el-select clearable v-model="f.domains" style="width: 100%" multiple filterable allow-create
+        <el-select :disabled="LOCK" clearable v-model="f.domains" style="width: 100%" multiple filterable allow-create
           default-first-option :reserve-keyword="false" placeholder="选择或输入实体域，如 binary_sensor / sensor"
           @change="scheduleSave()">
           <el-option v-for="d in ENTITY_DOMAINS" :key="d" :label="d" :value="d" />
         </el-select>
       </label>
       <label>placeholder（输入框里的灰字提示）
-        <el-input clearable v-model="f.placeholder" placeholder="如：选一个 on/off 的门磁传感器" @input="scheduleSave()" />
+        <el-input :disabled="LOCK" clearable v-model="f.placeholder" placeholder="如：选一个 on/off 的门磁传感器" @input="scheduleSave()" />
       </label>
       <label>tip（字段说明，鼠标悬停显示）
-        <el-input clearable v-model="f.tip" placeholder="如：用于判断门开合状态" @input="scheduleSave()" />
+        <el-input :disabled="LOCK" clearable v-model="f.tip" placeholder="如：用于判断门开合状态" @input="scheduleSave()" />
       </label>
 
       <!-- 分隔：上面是「怎么绑实体」，下面是「给人 / AI 看的说明性元信息」 -->
@@ -71,14 +75,14 @@ function enumOptions(f) {
            ⚠ 这里用 div 不用 label：label 会把整行空白区的点击都转给下拉框，鼠标点右边空白也会弹选项 -->
       <div class="fld-line">
         <span>字段类型（给人 / AI 看的说明，不参与渲染）</span>
-        <el-select v-model="f.valueType" style="width: 160px" @change="onTypeChange(f)">
+        <el-select :disabled="LOCK" v-model="f.valueType" style="width: 160px" @change="onTypeChange(f)">
           <el-option v-for="t in FIELD_TYPES" :key="t.value" :label="t.label" :value="t.value" />
         </el-select>
       </div>
 
       <div v-if="f.valueType === 'enum'" class="fld-line">
         <span>枚举值（可选常用值，也可直接输入自定义值后回车）</span>
-        <el-select v-model="f.enumValues" style="width: 100%" multiple filterable allow-create
+        <el-select :disabled="LOCK" v-model="f.enumValues" style="width: 100%" multiple filterable allow-create
           default-first-option :reserve-keyword="false" clearable
           placeholder="选常用值，或输入自定义值后回车添加" @change="scheduleSave()">
           <el-option v-for="v in enumOptions(f)" :key="v" :label="v" :value="v" />
@@ -91,10 +95,10 @@ function enumOptions(f) {
       </div>
 
       <div class="del">
-        <el-button link type="danger" @click="S.proj.fields.splice(i, 1); scheduleSave()">删除</el-button>
+        <el-button :disabled="LOCK" link type="danger" class="lock-block" @click="act.removeField(f)">删除</el-button>
       </div>
     </div>
-    <el-button @click="act.addField">＋ 添加字段</el-button>
+    <el-button :disabled="LOCK" class="lock-block" @click="act.addField">＋ 添加字段</el-button>
     <div class="hint">
       字段是「插件级实体绑定」，所有样式共用。key 会注入 AI 上下文，插件代码里用
       <code>obj[key]</code> 拿实体 id、<code>ctx.fieldState('key')</code> 读状态；

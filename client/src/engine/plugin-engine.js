@@ -2,16 +2,23 @@
  *
  * 相对原版砍掉的部分（studio 用不上）：
  *   - 多插件造型合并（同 type 多插件聚合样式）：这里一次只跑一个插件
- *   - 点击控制 click / 材质修复等展示层逻辑
+ *   - 材质修复等展示层逻辑
  * 保留的部分（正好是「有状态模型」的核心）：
- *   - register / styles / styleOf / defFor
+ *   - register / styles / styleOf / defFor / labelOffset / wantsLabel
  *   - model3d(ctx) 生命周期：group / update / dispose
  *   - 背景插件 kind:'background'：apply(ctx) → { group }，ctx 带 house / safe（与 home 同口径，
  *     原点 = 背景中心、偏移先进 house/safe；见 _spawnBackground）
  *   - ctx 能力集：THREE、glb、frame、box/cyl/sphere、lightKit、状态读取、扩展实体、animate
  *   - 2D 平面符号 plan2d(c, p)：户型图里那个设备/门窗线稿（见 planKit / planOf）
- *   - isOn(obj, get)：门窗「现在是不是开着」，给 2D 填充色用（见 isOnOf）
+ *   - isOn(obj, get)：唯一「开/合」判定入口（设备与门/窗共用），见 isOnOf
+ *   - 点击控制 click：只描述「点下去发什么服务」（on/off/domain/label/defaultOn），不含 isOn
  *   - 每帧 tick（插件动画）、状态变化 updateAll、场景重建 reset
+ *
+ * 插件分类（与 home 完全一致，只有两类）：
+ *   · kind:'device' —— 有状态模型（灯/开关/空调…）**以及门、窗**：门/窗只是
+ *     type:'door' / 'window' 的贴墙设备，注册契约、建造/标签/点击/2D 路径全部同构。
+ *     kind:'opening' 已废除，旧代码注册时自动归一成 'device'。
+ *   · kind:'background' —— 房屋外围地面，走 styles[].apply(ctx)。
  *
  * 与原版的差别：THREE 与实体状态源都由外部注入（studio 用 three npm 包 + 模拟实体），
  * 模型 URL 通过 resolveModelUrl 映射到 studio 的项目模型接口。
@@ -32,6 +39,14 @@ if (typeof window !== 'undefined' && !window.THREE) {
 function ico(inner) {
   return '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" '
     + 'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+}
+
+/* 背景刷新率（照搬 ha-3d-home/public/js/plugins.js 的 refreshOf）：
+ * 声明 refresh（Hz）；0/非法 = 静态。上限 30，避免插件把主线程写爆 */
+function refreshOf(item) {
+  const n = Number(item && item.refresh);
+  if (!isFinite(n) || n <= 0) return 0;
+  return Math.max(1, Math.min(30, Math.round(n)));
 }
 
 /* plan2d 的公共绘制原语（照搬 ha-3d-home/public/js/plugins.js 的 planKit）：
@@ -117,6 +132,10 @@ export function createPluginEngine(deps) {
     byId: {},
     instances: [],        // { def, obj, inst, anim, dead }
     _lastError: null,
+    /* 查询缓存：2D 预览每次重绘都会走 styleOf / defFor，styles() 聚合不便宜；
+       register（插件集变化）与 reset 时整体失效 */
+    _defCache: null,
+    _styleCache: null,
     /* 项目配置（styles / fields）：注册时覆盖代码里写死的同名字段。
      * 见 project-config.js —— 以项目为准，AI 代码里的常量不作依据 */
     projectConfig: null,
@@ -206,14 +225,29 @@ export function createPluginEngine(deps) {
       /* 配置以项目为准：先把项目的 styles / fields 合进来，再校验/登记。
          代码里写死的 styles/options 只当兜底（项目完全没配时才会用到） */
       applyProjectConfig(def, this.projectConfig);
+      /* 统一插件类：门/窗不再是独立类别，kind 一律 'device'，只有 type 区分 door/window。
+         旧项目代码里残留的 kind:'opening' 静默归一（提示一次），避免作者以为还要改数据 */
+      if (def.kind === 'opening') {
+        console.warn('[plugins] kind:\'opening\' 已废除，按 device 处理（门/窗用 type: \'door\'/\'window\'）:', def.id);
+        def.kind = 'device';
+      }
       const isBg = def.kind === 'background';
       if (!isBg && typeof (def.model3d || def.create) !== 'function') {
         throw new Error('插件 ' + def.id + ' 缺少 model3d(ctx)');
       }
+      if (!isBg && !def.type) {
+        console.warn('[plugins] 插件缺 type（HA 域或 door/window），样式不会归入任何分类:', def.id);
+      }
+      /* 3D 状态标签开关（注册时定死，实例不可改）：
+       *   设备缺省显示；门/窗缺省不显示（门洞上方挂状态牌很怪），要显示就显式 labels:true。
+       * 读取走 wantsLabel()，预览标签管线唯一入口。 */
+      def.labels = def.labels != null ? !!def.labels : !(def.type === 'door' || def.type === 'window');
       if (this.byId[def.id]) {
         const i = this.defs.indexOf(this.byId[def.id]);
         if (i >= 0) this.defs.splice(i, 1);
       }
+      this._defCache = null;     // 插件集变了，defFor / styleOf 查询缓存整体失效
+      this._styleCache = null;
       def.base = def.base || '';
       this.byId[def.id] = def;
       this.defs.push(def);
@@ -226,23 +260,56 @@ export function createPluginEngine(deps) {
       return this.defs.find((d) => d.type === typeOrId) || null;
     },
 
-    /* 造型查询：styleId 允许带插件前缀 'door:single'，也允许内部 id 'single' */
+    /* 某个实例最终用哪个插件：样式条目自带 plugin（样式所属插件）时用它，
+     * 否则回退同名/同 type 的插件。设备与门/窗共用这一条规则 —— 切样式 = 换插件
+     * （含 fields / plan2d / isOn / click）。studio 一次只跑一个插件，这里保留
+     * styleId 参数是为了与 home 的调用口径完全一致（将来支持多插件不用改调用方）。 */
+    defFor(typeOrId, styleId) {
+      if (!this._defCache) this._defCache = new Map();
+      const k = typeOrId + '|' + (styleId || '');
+      if (this._defCache.has(k)) return this._defCache.get(k);
+      const s = this.styleOf(typeOrId, styleId);
+      const v = (s && s.plugin && this.byId[s.plugin]) || this.defOf(typeOrId);
+      this._defCache.set(k, v);
+      return v;
+    },
+
+    /* 造型查询：styleId 允许带插件前缀 'door:single'，也允许内部 id 'single'。
+     * 聚合时给每条补 plugin / sid（样式所属插件、插件内部原始 id）—— 与 home 的
+     * prefixItem 同义，只是 studio 的样式 id 不加前缀（项目配置里就是原始 id）。
+     * defFor / planOf 靠 plugin 找「这个样式归哪个插件」，切样式 = 换插件。 */
     styles(typeOrId) {
       const out = [];
       this.defs.forEach((def) => {
         if (def.type !== typeOrId && def.id !== typeOrId) return;
-        (def.styles || []).forEach((s) => { if (s && s.id) out.push(s); });
+        (def.styles || []).forEach((s) => {
+          if (s && s.id) out.push(Object.assign({}, s, { sid: s.id, plugin: def.id }));
+        });
       });
       return out;
     },
 
+    /* 某个造型定义（缺省取该类型第一个）。走 Map 缓存：2D 预览每次重绘都会查。
+     * '插件id:造型id' 时先按插件过滤 —— 多个插件可能定义同 id 的造型（如 single）。 */
     styleOf(typeOrId, styleId) {
+      if (!this._styleCache) this._styleCache = new Map();
+      const k = typeOrId + '|' + (styleId || '');
+      if (this._styleCache.has(k)) return this._styleCache.get(k);
       const list = this.styles(typeOrId);
-      const id = styleId ? String(styleId).split(':').pop() : '';
-      return (id && list.find((s) => s.id === id || String(s.id).split(':').pop() === id)) || list[0] || null;
+      const raw = styleId ? String(styleId) : '';
+      const colon = raw.indexOf(':');
+      const pref = colon > 0 ? raw.slice(0, colon) : '';
+      const id = colon > 0 ? raw.slice(colon + 1) : raw;
+      let v = null;
+      if (id) {
+        v = (pref && list.find((s) => s.plugin === pref && (s.sid === id || s.id === id)))
+          || list.find((s) => s.id === id || s.sid === id || String(s.id).split(':').pop() === id)
+          || null;
+      }
+      v = v || list[0] || null;
+      this._styleCache.set(k, v);
+      return v;
     },
-
-    defFor(typeOrId) { return this.defOf(typeOrId); },
 
     /* ---- 参数合并 ---- */
     mergeOptions(schema, saved) {
@@ -257,12 +324,24 @@ export function createPluginEngine(deps) {
       return this.mergeOptions(style && style.options, obj && obj.styleOpts);
     },
 
-    /* 标签距地高度（米）：造型声明 labelOffset 时用它，否则给 0.3。
+    /* 标签距地高度（米）：造型声明 labelOffset 时用它，否则按类型给缺省
+       （设备 0.3；门 1.05 / 窗 1.45 ≈ 模型竖直中心）。
        labelOffset 语义 = 标签相对「设备模型接地面」的高度，不是相对包围盒顶面的偏移；
        预览标签实际锚点见 plugin-preview.labelInfo()（未声明时退回包围盒顶面） */
     labelOffset(typeOrId, styleId) {
       const s = this.styleOf(typeOrId, styleId);
-      return s && s.labelOffset != null ? s.labelOffset : 0.3;
+      if (s && s.labelOffset != null) return s.labelOffset;
+      const type = s && s.plugin ? (this.byId[s.plugin] || {}).type : (this.defOf(typeOrId) || {}).type;
+      if (type === 'window' || typeOrId === 'window') return 1.45;
+      if (type === 'door' || typeOrId === 'door') return 1.05;
+      return 0.3;
+    },
+
+    /* 该类型实例是否显示 3D 状态标签（register 时归一化的 labels，见上方注册）：
+     * 设备缺省开、门/窗缺省关（要显示需插件显式 labels:true）。预览标签管线唯一入口。 */
+    wantsLabel(typeOrId, styleId) {
+      const def = this.defFor(typeOrId, styleId);
+      return def ? !!def.labels : true;
     },
 
     /* ---- 状态文案 / 便捷判定（插件里可直接用 PluginEngine.xxx） ----
@@ -305,7 +384,7 @@ export function createPluginEngine(deps) {
 
     /* 插件声明的标签文案（MCP 可读，用于判断状态有没有「反映到界面文案上」） */
     labelOf(typeOrId, st, obj, get, styleId) {
-      const def = this.defFor(typeOrId);
+      const def = this.defFor(typeOrId, styleId);
       if (!def || typeof def.stateText !== 'function' || !st) return null;
       const read = typeof get === 'function' ? get : (eid) => ha.getState(eid);
       try { return def.stateText(st, obj || {}, read) || null; } catch (e) { return null; }
@@ -314,7 +393,11 @@ export function createPluginEngine(deps) {
     /* ---------------- 点击控制（口径同 ha-3d-home） ----------------
      * 点击设备 / 标签 → 按插件的 click 声明切主实体状态 → HA 推送 → update() 重渲染。
      * 未声明 click 时按 type 取内置默认；on/off 是服务名（'toggle'/'turn_on'/'turn_off'）
-     * 或 { service, domain }；isOn(st) 自定义「开」判定；defaultOn=false = 默认不可点 */
+     * 或 { service, domain }；defaultOn=false = 默认不可点。
+     * **click 只描述「点下去发什么」**：「当前算不算开着」统一由顶层 isOn(obj, get) 判定
+     * （见 isOnOf），click 里不再有 isOn 字段。
+     * 门/窗（type:'door'/'window'）没有内置默认 —— 不写 click 即不可点（门磁是只读实体，
+     * 点门没意义；车库门卷帘这类可遥控的才声明 open_cover/close_cover）。 */
     CLICK_DEFAULTS: {
       light: { on: 'toggle', off: 'toggle', label: '开 / 关' },
       switch: { on: 'toggle', off: 'toggle', label: '开 / 关' },
@@ -324,14 +407,17 @@ export function createPluginEngine(deps) {
       climate: { on: 'turn_on', off: 'turn_off', label: '开 / 关' },
     },
     clickSpec(typeOrId, styleId) {
-      const def = this.defFor(typeOrId);
+      const def = this.defFor(typeOrId, styleId);
       const raw = (def && def.click) || this.CLICK_DEFAULTS[def && def.type];
       if (!raw) return null;
-      const svc = (v, fb) => (typeof v === 'string' ? v : (v && v.service) || fb);
+      /* on/off 支持「自定义函数」形态（与 home 引擎同口径）：
+       *   fn(obj, api) — obj 实例数据，api = { call(dom,svc,data), get(eid), toast(msg), obj }
+       * 方向仍由顶层 isOn 驱动（isOnOf → isOnNow），函数只决定「怎么做」；
+       * 预览层 toggleDevice 识别函数并注入 mock api（见 plugin-preview） */
+      const svc = (v, fb) => (typeof v === 'function' ? v : typeof v === 'string' ? v : (v && v.service) || fb);
       return {
         on: svc(raw.on, 'toggle'),
         off: svc(raw.off, 'toggle'),
-        isOn: typeof raw.isOn === 'function' ? raw.isOn : null,
         label: raw.label || '开 / 关',
         defaultOn: raw.defaultOn !== false,
       };
@@ -340,18 +426,19 @@ export function createPluginEngine(deps) {
     /* ---------------- 2D 平面符号 plan2d(c, p) ----------------
      * 户型图里的门窗符号 / 设备简笔：编辑器已把画布 translate 到中心、rotate 到墙方向，
      * 插件只以原点为中心画中性线稿（颜色只用 p.fill / p.ink / p.accent / p.lw）。
+     * p.type = 插件归属的类型键（HA 域或 'door'/'window'），与 home 的 devicePlan 同口径。
      * 返回 (c, p) => 包围半径|void；插件没写 plan2d 时返回 null，调用方用兜底符号。 */
     planOf(typeOrId, styleId, obj) {
-      const def = this.defFor(typeOrId);
+      const def = this.defFor(typeOrId, styleId);
       if (!def || typeof def.plan2d !== 'function') return null;
       const style = this.styleOf(typeOrId, styleId);
-      const sid = style ? style.id : (styleId || '');
-      const isOpening = def.kind === 'opening';
+      const sid = style ? (style.sid || style.id) : String(styleId || '').split(':').pop();
+      const type = def.type || '';
       return (c, p) => {
         try {
           const pp = planKit(c, Object.assign({
             style: sid,
-            kind: isOpening ? (def.type || 'door') : undefined,
+            type,
             /* 样式参数（内开/外开…）：样式条目默认值 ∪ 实例已存值，2D 据此画差异 */
             options: this.styleOptionsOf(style, (p && p.obj) || obj),
           }, p));
@@ -364,17 +451,28 @@ export function createPluginEngine(deps) {
     },
 
     hasPlan(typeOrId) {
-      const def = this.defFor(typeOrId);
+      const def = this.defOf(typeOrId);
       return !!(def && typeof def.plan2d === 'function');
     },
 
-    /* 门窗的「开」判定：插件声明 isOn(obj, get) 优先（门磁 + 开度组合），
-     * 没实现返回 null → 调用方用默认规则（主实体 on/open 即开）。 */
-    isOnOf(typeOrId, obj, get) {
-      const def = this.defFor(typeOrId);
+    /* ---------------- 「开 / 合」判定的唯一入口 ----------------
+     * 插件只能声明一个判定函数：register 顶层的 isOn(obj, get)（与 plan2d 同级）。
+     *   obj  放置数据（obj.entityId / fields 里声明的拓展实体 key 都在上面）
+     *   get  (entityId) => 状态对象|null；不传时默认走注入的 ha.getState
+     * 设备、门、窗共用：
+     *   设备 → isOn(obj,get) { return PluginEngine.runningState(get(obj.entityId)); }
+     *   门窗 → 按 fields 绑定的多个实体组合（窗 = 开关 on 且开度>0 这类）
+     * 返回 boolean|null：插件没实现（或返回 null）→ 调用方继续走默认规则。
+     * 插件实现抛异常时 warn 并回退，不会中断渲染。
+     * 调用方：plugin-preview.isOnNow / planOn（标签高亮、2D 填充、点击方向同一结论）。 */
+    isOnOf(typeOrId, styleId, obj, get) {
+      const def = this.defFor(typeOrId, styleId);
       if (def && typeof def.isOn === 'function') {
         const read = typeof get === 'function' ? get : (eid) => ha.getState(eid);
-        try { return !!def.isOn(obj || {}, read); } catch (e) {
+        try {
+          const r = def.isOn(obj || {}, read);
+          return r == null ? null : !!r;   // 插件返回 null/undefined = 我不判定，继续往下兜底
+        } catch (e) {
           console.warn('[plugins] isOn 判定失败:', def.id, e);
         }
       }
@@ -543,6 +641,8 @@ export function createPluginEngine(deps) {
     /* ---------------- 实例生命周期 ---------------- */
     /**
      * 背景插件（kind:'background'）：调样式条目的 apply(ctx) → { group, refresh?, update? }。
+     * refresh>0 时由 tick() 按频率回调 update(t, api)（口径同 home：钳 1..30Hz、首帧立即、
+     * 连续 3 次异常自动停刷）；0/缺省 = 静态只画一次，不进调度。
      * 口径与 ha-3d-home 的 applyBackground 完全一致（原点 = 背景中心）：
      *   · ctx 里的 house / safe 都是「背景坐标系」—— 房屋可以不在画面正中
      *   · studio 没有真实房屋，由「左下角卡片的安全范围（长×宽，米）」画一个半透明长方体占位，
@@ -614,12 +714,15 @@ export function createPluginEngine(deps) {
         size: 512,
         house, safe,
         options: bgOpts,
-        refresh: Number(style && style.refresh) || 0,
+        refresh: refreshOf(style),
         plane,
         planeSize: planeM,   // 默认平面边长（米）：画布 ↔ 米 的换算用得上
       };
       const ret = (typeof style.apply === 'function' ? style.apply(bgCtx) : null) || {};
       if (!ret.group) throw new Error('背景 apply 没有返回 { group }，引擎将清空背景');
+      /* 刷新率: 样式声明 refresh（Hz），apply 返回值可覆盖（与 home plugins.js 同口径）；0 = 静态 */
+      const hz = refreshOf(ret.refresh != null ? ret : style);
+      const upd = typeof ret.update === 'function' ? ret.update : null;
 
       /* 落位：group 的局部原点 = 背景中心，摆到世界里的「房屋中心 − 偏移」。
        * studio 的房屋恒在世界原点，故为 (−offX, 0, −offZ)：房屋纹丝不动，背景整体绕着它偏。 */
@@ -643,7 +746,9 @@ export function createPluginEngine(deps) {
         group: root,
         safeBox: box,          /* 预览层改安全范围时直接 scale 它，实时预览不重绘背景 */
         bgGroup: ret.group,    /* 预览层改 offsetX/offsetZ 时直接平移它，实时预览不重绘背景 */
-        update: null,
+        update: upd,           /* refresh>0 时由 tick() 按频率回调 update(t, api) */
+        hz,                    /* 0 = 静态（不进调度，零每帧开销）；1..30 = 每秒回调这么多次 */
+        _bgApi: { group: ret.group, mesh: null, size: ret.size || 512 },
         dispose: () => {},
       };
     },
@@ -690,7 +795,11 @@ export function createPluginEngine(deps) {
       this.instances.push(rec);
 
       if (api.update) {
-        try { api.update(); } catch (e) { console.warn('[plugin:' + def.id + '] update 出错:', e); }
+        try {
+          /* 背景实例按 home 口径首帧立即画一次（update(0, api)），避免首帧空白 */
+          if (api._bgApi) api.update(0, api._bgApi);
+          else api.update();
+        } catch (e) { console.warn('[plugin:' + def.id + '] update 出错:', e); }
       }
       onRender();
       return api;
@@ -699,27 +808,64 @@ export function createPluginEngine(deps) {
     updateAll() {
       this.instances.forEach((rec) => {
         if (rec.dead || !rec.inst || !rec.inst.update) return;
-        try { rec.inst.update(); } catch (e) { console.warn('[plugin:' + rec.def.id + '] update 出错:', e); }
+        const it = rec.inst;
+        try {
+          /* 背景实例按 home 口径传 (t, api)，t 取已累计的运行时长 */
+          if (it._bgApi) it.update((it._bgState && it._bgState.t) || 0, it._bgApi);
+          else it.update();
+        } catch (e) { console.warn('[plugin:' + rec.def.id + '] update 出错:', e); }
       });
       onRender();
     },
 
+    /* 每帧驱动：插件动画 anim(dt) + 动态背景按各自 refresh(Hz) 节流回调 update(t, api)。
+     * 背景节流与 ha-3d-home tickBackground 同款——用「下一次触发时刻」而不是累加器：
+     * 60fps 下跑 10Hz 不会因为浮点漂移少触发；掉帧只补一次并对齐下一间隔，避免补帧雪崩。 */
     tick(dt) {
+      const d = Math.min(0.25, Math.max(0, dt || 0));   // 切回标签页的长 dt 不追帧
       this.instances.forEach((rec) => {
-        if (rec.dead || !rec.anim) return;
-        try { rec.anim(dt); } catch (e) { /* 单帧异常忽略 */ }
+        if (rec.dead) return;
+        if (rec.anim) { try { rec.anim(d); } catch (e) { /* 单帧异常忽略 */ } }
+        const it = rec.inst;
+        if (it && it.hz > 0 && typeof it.update === 'function') this._tickBg(rec, it, d);
       });
     },
 
-    /** 清空所有实例（场景重建 / 重新预览前调用），并通知插件 dispose */
-    reset() {
+    _tickBg(rec, it, dt) {
+      const st = it._bgState || (it._bgState = { t: 0, next: 1 / it.hz, errs: 0 });
+      st.t += dt;
+      if (st.t < st.next) return;
+      const iv = 1 / it.hz;
+      const steps = Math.floor((st.t - st.next) / iv) + 1;
+      st.next = steps > 2 ? st.t + iv : st.next + steps * iv;
+      try { it.update(st.t, it._bgApi); }
+      catch (e) {
+        st.errs++;
+        if (st.errs === 1) console.warn('[plugin:' + rec.def.id + '] 背景刷新出错:', e);
+        if (st.errs >= 3) {
+          console.warn('[plugin:' + rec.def.id + '] 背景连续出错，已停止刷新');
+          it.hz = 0;   // 坏插件自动退出调度，不拖垮整个预览
+        }
+      }
+    },
+
+    /** 只清实例（几何/动画/刷新调度），保留 defs —— 改参数后的快速重生（respawn）用：
+     *  代码不重新执行、def 原地复用，几何按内存里的新参数值重画 */
+    clearInstances() {
       this.instances.forEach((rec) => {
         rec.dead = true;
         if (rec.inst && rec.inst.dispose) { try { rec.inst.dispose(); } catch (e) { /* ignore */ } }
       });
       this.instances = [];
+    },
+
+    /** 清空所有实例（场景重建 / 重新预览前调用），并通知插件 dispose */
+    reset() {
+      this.clearInstances();
       this.defs = [];
       this.byId = {};
+      this._defCache = null;
+      this._styleCache = null;
     },
   };
 

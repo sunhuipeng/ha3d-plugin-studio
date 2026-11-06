@@ -1,6 +1,5 @@
 <script setup>
 import { onMounted, computed, ref } from 'vue';
-import { ElMessageBox } from 'element-plus';
 import { S, act, toast, bigToast, initRoute } from './store';
 import Home from './components/Home.vue';
 import LeftRail from './components/LeftRail.vue';
@@ -13,76 +12,45 @@ initWs();
 
 onMounted(() => { act.loadTarget(); act.loadProjects().catch((e) => toast(e.message, true)); initRoute(); });
 
-/* ---- 配置快照：属性 / 字段 / 样式改过而代码没重新生成 → 发布/导出前提醒 ---- */
+/* ---- 配置漂移：当前引擎内存 vs 代码加载时的基线（styles/fields），客户端算好放在 S.snapshot ---- */
 const snapText = computed(() => {
   const s = S.snapshot;
-  if (!s.has) return '未记录快照';
+  if (!s.has) return '配置与代码一致';
   if (s.stale) return `配置已变更 ${s.changeCount} 处`;
-  return '配置与快照一致';
+  return '配置与代码一致';
 });
 const snapTitle = computed(() => {
   const s = S.snapshot;
-  if (!s.has) return '还没有配置快照。点一下把当前属性 / 字段 / 样式记下来，之后发布前会自动对账';
-  const t = s.at ? new Date(s.at).toLocaleString('zh-CN', { hour12: false }) : '';
-  const head = `快照：${t}${s.label ? '（' + s.label + '）' : ''} · v${s.version || '-'}`;
-  if (!s.stale) return head + '\n配置与快照一致';
-  return head + `\n改过的配置（${s.scopes.settings} 属性 / ${s.scopes.styles} 样式 / ${s.scopes.fields} 字段）：\n· `
-    + (s.summary.join('\n· ') || s.hint);
+  if (!s.has) return '还没有渲染过插件：渲染成功后以「AI 代码声明的样式/字段」为基线，之后改了配置这里会显示差异';
+  if (!s.stale) return '当前内存配置与 AI 代码加载时声明的一致';
+  return `相对代码加载时的配置（基线），样式 ${s.scopes.styles} / 字段 ${s.scopes.fields} 处不同：\n· `
+    + (s.summary.join('\n· ') || '（无明细）');
 });
 
-const esc = (v) => String(v == null ? '' : v)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/* ---- 配置漂移弹窗：替代 ElMessageBox，结构 = 总述 → 逐条差异 → 提示 → 单按钮 ----
+ * driftAsk 存触发来源动作（'发布' | '导出'），null = 关闭；按钮文案随之变「仍然发布/仍然导出」 */
+const driftAsk = ref(null);
 
-/* 发布 / 导出前对账：配置与快照不一致就弹窗提醒「让 AI 重新生成」（只提醒，不拦） */
-async function ensureConfigFresh(action) {
-  const d = await act.loadSnapshot();
-  if (!d || !d.stale) return true;
-  const rows = (d.summary || []).slice(0, 8)
-    .map((t) => `<div class="drift-row"><i class="drift-dot"></i><span>${esc(t)}</span></div>`)
-    .join('');
-  const more = d.changeCount > 8
-    ? `<div class="drift-row dim"><span>…另外还有 ${d.changeCount - 8} 处</span></div>` : '';
-  try {
-    await ElMessageBox.alert(
-      `<div class="drift-msg">`
-      + `<p class="drift-head">快照之后配置改了 <b>${d.changeCount}</b> 处`
-      + `（属性 ${d.scopes.settings} / 样式 ${d.scopes.styles} / 字段 ${d.scopes.fields}）：</p>`
-      + `<div class="drift-list">${rows || '<div class="drift-row dim"><span>（无明细）</span></div>'}${more}</div>`
-      + `<p class="drift-note">plugin.js 还是按<b>旧配置</b>写的，${action}出去的效果可能不对。`
-      + `建议让 AI 重新生成后再${action}。</p>`
-      + `</div>`,
-      {
-        dangerouslyUseHTMLString: true,
-        confirmButtonText: `仍然${action}`,
-        customClass: 'drift-box',
-      }
-    );
-    return true;
-  } catch (e) { return false; }
+function onSnapChip() {
+  const s = S.snapshot;
+  if (!s.has) { toast('渲染一次插件后，就会以 AI 代码声明的样式/字段建立对比基准'); return; }
+  if (!s.stale) { toast('当前配置与代码加载时一致'); return; }
+  driftAsk.value = '发布';
 }
 
-async function onSnapChip() {
-  const s = S.snapshot;
-  try {
-    if (!s.has) {
-      await ElMessageBox.confirm(
-        '把当前的属性（settings）、字段（fields）、样式（styles）复制进项目的 snapshot 字段。<br>'
-        + '之后改了这些配置而代码没重新生成，发布 / 导出时会提醒你。',
-        '记录配置快照',
-        { dangerouslyUseHTMLString: true, confirmButtonText: '记录快照', cancelButtonText: '取消' }
-      );
-      await act.takeSnapshot('');
-      return;
-    }
-    if (!s.stale) { toast('配置与快照一致，无需更新'); return; }
-    await ElMessageBox.confirm(
-      `当前配置与快照有 <b>${s.changeCount}</b> 处不同。<br>刷新快照只是把「已变更」标记清掉，`
-      + `<b>不会</b>让代码跟着配置改 —— 如果代码还要按新配置重写，先让 AI 重新生成再刷新。`,
-      '配置已变更',
-      { dangerouslyUseHTMLString: true, confirmButtonText: '仍要刷新快照', cancelButtonText: '取消', type: 'warning' }
-    );
-    await act.takeSnapshot('');
-  } catch (e) { /* 取消 */ }
+/* 弹窗里唯一的按钮：确认后继续原动作（发布 → 选版本弹窗；导出 → 直接打包下载） */
+function confirmDrift() {
+  const a = driftAsk.value;
+  driftAsk.value = null;
+  if (a === '发布') pubAsk.value = true;
+  else if (a === '导出') act.exportZip().catch((e) => toast(e.message, true));
+}
+
+/* 发布 / 导出前对账：有差异就先弹差异弹窗（confirmDrift 里继续），没差异直接放行 */
+function ensureConfigFresh(action) {
+  const d = S.snapshot;
+  if (d.has && d.stale) { driftAsk.value = action; return false; }
+  return true;
 }
 
 /* 发布确认弹窗：点遮罩 / × = 放弃发布；两张选项卡即按钮，点了直接执行 */
@@ -135,7 +103,7 @@ function onPublishCmd(cmd) {
         <!-- 右侧操作区：已保存 → 配置快照 → 发布，贴右边缘排布（右侧不留空白） -->
         <div class="topbar-right">
           <span class="save-state">{{ S.saveState }}</span>
-          <!-- 配置快照状态：点一下 = 记录/刷新快照（属性 + 字段 + 样式） -->
+          <!-- 配置漂移状态：内存 vs 代码基线；点一下 = 以当前内存为准重置基线 -->
           <button class="snap-chip" :class="{ stale: S.snapshot.stale, none: !S.snapshot.has }"
                   :title="snapTitle" @click="onSnapChip">
             <span class="snap-dot"></span>{{ snapText }}
@@ -184,6 +152,38 @@ function onPublishCmd(cmd) {
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 配置差异弹窗：总述 → 逐条差异 → 提示 → 单按钮（点遮罩 / × = 关闭不动作） -->
+    <transition name="big-fade">
+      <div v-if="driftAsk" class="modal-mask" @click.self="driftAsk = null">
+        <div class="pub-modal drift-modal">
+          <button class="pub-close" aria-label="关闭" @click="driftAsk = null">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+          </button>
+          <div class="pub-title">配置已变更</div>
+
+          <!-- ① 总述：一共有几处 -->
+          <p class="drift-count">
+            当前参数和实际代码中的参数有
+            <b>{{ S.snapshot.changeCount }}</b>
+            处不同<span class="drift-scope">（样式 {{ S.snapshot.scopes.styles }} / 字段 {{ S.snapshot.scopes.fields }}）</span>
+          </p>
+
+          <!-- ② 逐条差异 -->
+          <div class="drift-list">
+            <div v-for="(t, i) in S.snapshot.summary" :key="i" class="drift-row">
+              <i class="drift-dot"></i><span>{{ t }}</span>
+            </div>
+            <div v-if="!S.snapshot.summary.length" class="drift-row dim"><span>（无明细）</span></div>
+          </div>
+
+          <!-- ③ 提示 -->
+          <p class="drift-hint">当前参数和实际代码中的参数有差异，如需按当前参数发布，可让 AI 重新拉取代码和参数，进行自动合并。</p>
+
+          <button type="button" class="drift-go" @click="confirmDrift">仍然{{ driftAsk }}</button>
         </div>
       </div>
     </transition>

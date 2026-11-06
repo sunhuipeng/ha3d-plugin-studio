@@ -146,7 +146,7 @@ console.log('  （洞口 L=120，门扇+弧应到 y=120，门框应在 y=-3..2�
 
 /* 3) isOn：门磁关 / 比例 0 / 比例 50 三种 */
 obj.styleOpts = {};
-const onOf = () => engine.isOnOf(def.id, obj, (id) => states.get(id));
+const onOf = () => engine.isOnOf(def.id, 'ping', obj, (id) => states.get(id));
 set('binary_sensor.door', 'off'); set('sensor.ratio', '100');
 console.log('\n[isOn] 门磁 off + 比例 100 →', onOf());
 set('binary_sensor.door', 'on'); set('sensor.ratio', '0');
@@ -158,7 +158,7 @@ console.log('[isOn] 门磁 on  + 比例 50  →', onOf());
       离屏量包围盒 → 等比缩放居中 → 真画布上矢量重画 */
 const pv = {
   planInfo: () => ({
-    ready: true, kind: 'opening', type: 'door', hasPlan: true, on: onOf(), w: 0.9,
+    ready: true, kind: 'device', type: 'door', hasPlan: true, on: onOf(), w: 0.9,
     styleId: 'ping', options: {}, entityId: 'binary_sensor.door', state: states.get('binary_sensor.door'),
     obj, getState: (id) => states.get(id), label: '开 50%',
   }),

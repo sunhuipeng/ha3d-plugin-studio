@@ -109,7 +109,9 @@ export function drawPlan(cv, pv) {
     return true;
   }
 
-  const isOpening = info.kind === 'opening';
+  /* 门/窗是 type:'door'/'window' 的贴墙设备（kind 与设备同为 'device'）：
+     它们有洞口宽度（符号沿墙展开），设备是「点状物」（按 ppm 画自己的图形） */
+  const isOpening = info.type === 'door' || info.type === 'window';
   const w = Math.max(0.2, Number(info.w) || 0.9);
   const L = isOpening ? OFF_L : 0;
   const ppm = isOpening ? L / w : OFF_PPM;
@@ -129,7 +131,6 @@ export function drawPlan(cv, pv) {
     on: !!info.on,
     hasState: info.hasState !== false,
     type: info.type || '',
-    kind: info.type || (isOpening ? 'door' : 'device'),
     style: String(info.styleId || '').split(':').pop(),
     fill: info.on ? '#fdeecb' : '#fff',   // 开 = 暖琥珀，关 = 白（和户型图一致）
     ink,

@@ -6,3 +6,4 @@ data/
 .DS_Store
 _shots/
 package-lock.json
+dist/

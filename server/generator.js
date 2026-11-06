@@ -1,26 +1,21 @@
 /* 插件代码打包 + 发布校验。
- * 代码不再有模板生成：plugin.js 一律就是项目里那份 customJs（AI 生成 / 手写）。
+ * plugin.js 一律就是项目里那份 customJs（AI 生成 / 手写），导出/发布原样打包、不包任何注入层。
  * styles/fields/options 以**项目配置**为准（AI 代码里写死的常量不作依据）：
- *   · 预览：引擎在 register 时合并（client/src/engine/project-config.js）
- *   · 发布 / 导出：把配置快照注进 plugin.js（server/inject-config.js），安装端不用改
- * 因此 buildAll 的 inject 只在「要拿出去安装」时打开；预览接口 /build 返回原始代码。 */
+ * 预览侧由引擎在 register 时合并（client/src/engine/project-config.js）；
+ * 预览接口 /build 与打包产物返回同一份原始代码，代码面板里看到的就是打包出来的那份。 */
 'use strict';
 
 const { safeId } = require('./config');
 const { normalizeOptionType } = require('./option-schema');
 const { FIELD_TYPE_VALUES, normalizeFieldType, normalizeEnumValues } = require('./field-schema');
-const { injectProjectConfig } = require('./inject-config');
 
 function modelListOf(proj) {
   return (Array.isArray(proj.models) ? proj.models : []).filter(Boolean);
 }
 
-/* plugin.js = 项目里的 customJs（可能为空 = 还没有代码）
- * opts.inject=true 时再注入项目 styles/fields 快照（发布 / 导出用） */
-function buildPluginJS(proj, opts) {
-  const code = String(proj.customJs == null ? '' : proj.customJs);
-  if (!opts || !opts.inject) return code;
-  return injectProjectConfig(code, { styles: proj.styles || [], fields: proj.fields || [] });
+/* plugin.js = 项目里的 customJs 原文（可能为空 = 还没有代码），不包任何注入层 */
+function buildPluginJS(proj) {
+  return String(proj.customJs == null ? '' : proj.customJs);
 }
 
 function buildManifest(proj, bump) {
@@ -32,15 +27,19 @@ function buildManifest(proj, bump) {
     else version = '1.0.1';
   }
   /* id 一律 = 项目 id：安装端按它定位/替换插件目录，重复安装永远覆盖同一份，
-   * 不再单独维护 projectId 字段（插件 id 输入框只用于展示，写入时以项目 id 为准） */
-  const mf = { id: proj.id, name: p.name || proj.id, version, kind: p.kind || 'device' };  if (mf.kind !== 'background') mf.type = p.type || 'other';
+   * 不再单独维护 projectId 字段（插件 id 输入框只用于展示，写入时以项目 id 为准）
+   * kind 只有两类：device（设备 + 门/窗，靠 type 区分）与 background。
+   * 老项目里残留的 kind:'opening' 在导出时归一成 device（home 侧已废除 opening） */
+  const kind = p.kind === 'opening' ? 'device' : (p.kind || 'device');
+  const mf = { id: proj.id, name: p.name || proj.id, version, kind };
+  if (kind !== 'background') mf.type = p.type || 'other';
   if (p.description) mf.description = p.description;
   return mf;
 }
 
-const buildAll = (proj, bump, opts) => ({
+const buildAll = (proj, bump) => ({
   manifest: buildManifest(proj, bump),
-  js: buildPluginJS(proj, opts),
+  js: buildPluginJS(proj),
 });
 
 function validate(proj) {
@@ -48,7 +47,7 @@ function validate(proj) {
   const p = proj.plugin || {};
   if (!safeId(proj.id)) w.push({ level: 'error', msg: '项目 id 不合法（应为小写字母开头的字母/数字/下划线）' });
   if (!p.name) w.push({ level: 'error', msg: '插件名称不能为空' });
-  if (p.kind !== 'background' && !p.type) w.push({ level: 'error', msg: 'device/opening 插件必须选择 type' });
+  if (p.kind !== 'background' && !p.type) w.push({ level: 'error', msg: '设备类插件（含门/窗）必须选择 type' });
   /* 参数(options)按样式校验 */
   const styles = (proj.styles && proj.styles.length ? proj.styles : [{ id: 'default' }]);
   for (const s of styles) {

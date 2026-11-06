@@ -1,11 +1,20 @@
 /* ha3d-plugin-studio 前端全局状态与动作 */
 import { reactive } from 'vue';
 import { bumpModel } from './thumb';
-import { normalizeOptionType } from './option-schema';
+import { normalizeOptionType, stripExtraOptionKeys } from './option-schema';
 import { normalizeField } from './field-schema';
+import { diffConfig } from './config-diff';
 
+/* 设备类插件（kind:'device'）可选的 type：
+ *   DEVICE_TYPES —— HA 实体域（灯/开关/空调…）
+ *   WALL_TYPES   —— 贴墙设备：门 / 窗。它们**没有独立的 kind**，就是 type 不同的设备类，
+ *                   只是数据放在 home 的 floors.doors/windows 里、默认不显示 3D 标签。
+ * OPENING_TYPES 是旧名字（面板与脚本仍在用），等价于 WALL_TYPES。 */
 export const DEVICE_TYPES = ['light', 'switch', 'sensor', 'climate', 'water_heater', 'cover', 'fan', 'media_player', 'vacuum', 'camera', 'other'];
-export const OPENING_TYPES = ['door', 'window'];
+export const WALL_TYPES = ['door', 'window'];
+export const OPENING_TYPES = WALL_TYPES;
+export const MODEL_TYPES = DEVICE_TYPES.concat(WALL_TYPES);
+export const isWallType = (t) => t === 'door' || t === 'window';
 export const OPTION_TYPES = [
   { value: 'range', label: 'range 滑条' },
   { value: 'number', label: 'number 数字' },
@@ -33,17 +42,28 @@ export const S = reactive({
   previewNode: '',    // 大图预览里高亮的 GLB 内节点名（空 = 整个模型）
   fixing: false,      // 材质修复中
   previewStatus: null, // 插件渲染区状态快照（PluginStage 写入，PlanInset/CodePanel 读）
+  /* 引擎运行后的内存镜像（live 引用，reactive 包装 def.styles / def.fields）：
+   * UI（样式胶囊 / 左下面板卡片 / MCP）读这里 —— AI 代码声明什么就显示什么。
+   * 保存时 fullSyncEngineToProject() 把它全量覆盖进项目 JSON（内存镜像存档）。
+   * 每次渲染/重生成功后 syncEngineMirror() 重建。 */
+  engineStyles: null,
+  engineFields: null,
   toast: { show: false, msg: '', err: false },
   mcp: { active: false, connected: false, text: '', busy: false },  // MCP 连接/调用提示横条（前端顶部）
+  /* 配置锁（服务端内存态，见 server/lock.js）：locked 时左侧浮层只读，
+   * 避免人和 AI 同时改配置互相覆盖。by = 'mcp'（AI 改）/ 'user'（人改） */
+  lock: { locked: false, by: '', at: 0, note: '' },
   publishing: false,                                   // 发布/导出进行中（禁用发布按钮 + 等待动画）
   bigToast: { show: false, title: '', detail: '' },    // 居中大横幅成功提示（发布成功等）
-  /* 配置快照对账状态（GET /api/projects/:id/snapshot）：stale = 配置改过、代码可能没跟着变 */
+  /* 配置漂移对账状态（客户端算，见 refreshDrift）：
+   * 基线 = 代码加载时（合并项目 JSON 前）的 styles/fields 深拷贝（def._baseline）；
+   * stale = 当前引擎内存与基线不同 → 顶栏「配置已变更 N 处」 */
   snapshot: {
-    has: false, at: '', label: '', version: '',
-    stale: false, changeCount: 0,
-    scopes: { settings: 0, styles: 0, fields: 0 },
+    has: false, stale: false, changeCount: 0,
+    scopes: { styles: 0, fields: 0 },
     summary: [], hint: '',
   },
+  codeBaseline: null,   // { styles, fields } 纯数据；渲染成功后从 def._baseline 取
 });
 
 /* 视口组件注册进来的能力（地面/归零等需要 three 场景） */
@@ -62,6 +82,36 @@ export function bigToast(title, detail = '') {
   S.bigToast = { show: true, title, detail };
   clearTimeout(bigToastTimer);
   bigToastTimer = setTimeout(() => { S.bigToast.show = false; }, 3200);
+}
+
+/* ---- 配置锁（只作用于当前页面）----
+ * 纯前端状态：锁定期间左侧所有浮层只读（样式层 + CSS 双保险）、本地改动不落盘，
+ * 免得用旧内存覆盖 AI 刚写进 project.json 的配置。
+ * 服务端既不存也不判：刷新 / 重开页面一律回到未锁，永远不会「锁死解不开」。 */
+export function applyLock(st) {
+  if (!st) { S.lock = { locked: false, by: '', at: 0, note: '' }; return; }
+  S.lock = {
+    locked: !!st.locked,
+    by: st.by || '',
+    at: Number(st.at) || 0,
+    note: st.note || '',
+  };
+}
+
+/* 锁是谁的：AI 还是人（提示文案用） */
+export function lockByText() {
+  return S.lock.by === 'mcp' ? 'AI' : '你';
+}
+
+let lockTipAt = 0;
+/* 锁定期间的写操作统一拦在这一层（UI 之外的双保险） */
+function denyWhenLocked() {
+  if (!S.lock.locked) return false;
+  if (Date.now() - lockTipAt > 2500) {
+    lockTipAt = Date.now();
+    toast('配置已锁定（' + lockByText() + '正在改）：左侧面板只读，解锁后才能编辑', true);
+  }
+  return true;
 }
 
 export async function api(method, url, body, raw) {
@@ -83,13 +133,21 @@ function normalize(proj) {
   proj.plugin.entityId ||= '';
   /* 插件名称 = 项目名称（项目名是唯一来源；老数据里改乱的在打开时自动对齐） */
   if (proj.name) proj.plugin.name = proj.name;
+  /* 统一插件类迁移：门/窗原先的 kind:'opening' 已废除，改为 kind:'device' + type door/window。
+     打开老项目时静默升级，代码里残留的 kind:'opening' 由引擎注册时归一 */
+  if (proj.plugin.kind === 'opening') proj.plugin.kind = 'device';
+  if (!proj.plugin.kind) proj.plugin.kind = 'device';
+  /* 背景类没有实体类型（面板里 type 输入框是隐藏的）：值统一固定成 'bg' */
+  if (proj.plugin.kind === 'background') proj.plugin.type = 'bg';
   proj.styles ||= [{ id: 'default', name: proj.plugin.name || '默认造型', z: 0, icon: '', desc: '', options: [] }];
   for (const s of proj.styles) {
     if (!Array.isArray(s.options)) s.options = [];
     for (const o of s.options) {
-      /* type 归一化：bool → checkbox，缺省/未知 → text（口径见 option-schema.js） */
+      /* type 归一化 + 按「类型 → 字段」表剔除不适用键（min/max/step/choices）：
+       * 老存档里的历史脏数据（如非 range 参数带着 min/max）打开时即清掉 */
       if (!o || typeof o !== 'object') continue;
       o.type = normalizeOptionType(o.type);
+      stripExtraOptionKeys(o, o.type);
       if (o.type === 'select' && !Array.isArray(o.choices)) o.choices = [];
     }
   }
@@ -109,32 +167,95 @@ function normalize(proj) {
   return proj;
 }
 
-/* 当前编辑的样式与其参数 */
+/* UI 读的样式/字段列表：引擎内存优先（运行后的真实数据），没渲染过 / 渲染失败时回落项目配置 */
+export function engineList() {
+  if (S.engineStyles && S.engineStyles.length) return S.engineStyles;
+  return (S.proj && S.proj.styles) || [];
+}
+export function engineFieldList() {
+  if (S.engineFields && S.engineFields.length) return S.engineFields;
+  return (S.proj && S.proj.fields) || [];
+}
+
+/* 渲染成功后由 PluginStage 调：把引擎内存 def.styles / def.fields 包装成 reactive 给 UI。
+ * 是 live 引用：UI 通过它改值，引擎 spawn 时读到的就是新值（respawn 即时生效）。
+ * 同时取代码基线（def._baseline，applyProjectConfig 合并前深拷贝的那份）做漂移对账。 */
+export function syncEngineMirror(preview) {
+  if (!preview || !preview.def) {
+    S.engineStyles = null; S.engineFields = null; S.codeBaseline = null; return;
+  }
+  S.engineStyles = reactive(preview.def.styles || []);
+  S.engineFields = reactive(preview.def.fields || []);
+  S.codeBaseline = preview.def._baseline || null;
+  refreshDrift();
+}
+
+/* 漂移对账：当前引擎内存 vs 代码基线 → 顶栏「配置已变更 N 处」。
+ * 触发点：渲染成功（syncEngineMirror）、每次保存（值/结构改动落盘时） */
+function refreshDrift() {
+  const base = S.codeBaseline;
+  if (!base || !S.engineStyles) {
+    S.snapshot = { has: false, stale: false, changeCount: 0, scopes: { styles: 0, fields: 0 }, summary: [], hint: '' };
+    return;
+  }
+  const d = diffConfig(base.styles, base.fields, S.engineStyles || [], S.engineFields || [],
+    S.proj && S.proj.plugin && S.proj.plugin.kind);
+  S.snapshot = {
+    has: true,
+    stale: d.changeCount > 0,
+    changeCount: d.changeCount,
+    scopes: d.scopes,
+    summary: d.summary,
+    hint: '',
+  };
+}
+
+/* 当前编辑的样式与其参数（引擎内存优先） */
 export function curStyle() {
-  if (!S.proj || !S.proj.styles?.length) return null;
-  return S.proj.styles.find((s) => s.id === S.styleId) || S.proj.styles[0];
+  const list = engineList();
+  if (!list.length) return null;
+  return list.find((s) => s.id === S.styleId) || list[0];
 }
 
 let saveTimer = null;
 export function scheduleSave() {
   if (!S.proj) return;
+  /* 锁只作用在左侧浮层面板（那边控件已只读）；中间编辑区（左下角参数卡等）照常可改可存，
+     所以这里不拦保存 —— 拦住反而会让合法改动只留在内存里。 */
   S.saveState = '未保存…';
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 900);
 }
 
-let lastSnapCheck = 0;
-export async function saveNow() {
+/* 全量覆盖：保存前把引擎内存的 styles / fields 序列化进项目 JSON。
+ * JSON = 配置唯一事实源（结构与数据的来源，加载时按它重建 def）；
+ * 函数属性（背景 apply 等）无法序列化，恢复时由代码侧提供。 */
+function fullSyncEngineToProject() {
+  if (!S.proj || !S.engineStyles) return;   // 没渲染过 → JSON 保持原样
+  S.proj.styles = S.engineStyles.filter((s) => s && s.id).map((s) => {
+    const out = { id: s.id, name: s.name || s.id };
+    ['icon', 'desc', 'z', 'labelOffset', 'refresh'].forEach((k) => {
+      if (s[k] !== undefined) out[k] = s[k];
+    });
+    out.options = (s.options || []).filter((o) => o && typeof o === 'object' && o.key)
+      .map((o) => JSON.parse(JSON.stringify(o)));
+    return out;
+  });
+  S.proj.fields = (S.engineFields || []).filter((f) => f && f.key)
+    .map((f) => JSON.parse(JSON.stringify(f)));
+}
+
+export async function saveNow(opts) {
   if (!S.proj) return;
   try {
+    fullSyncEngineToProject();
     await api('PUT', `/api/projects/${S.proj.id}`, { project: S.proj });
     S.saveState = '已保存 ✓';
-    /* 配置可能刚被改过 → 顺手重算一次「与快照的差异」，顶栏徽标跟手（1.5s 节流） */
-    if (S.snapshot.has) {
-      const now = Date.now();
-      if (now - lastSnapCheck > 1500) { lastSnapCheck = now; act.loadSnapshot(); }
-    }
-  } catch (e) { toast('保存失败: ' + e.message, true); }
+    refreshDrift();   // 值/结构可能刚改过 → 顶栏「配置已变更」跟手
+  } catch (e) {
+    toast('保存失败: ' + e.message, true);
+    if (opts && opts.throwOnError) throw e;   // MCP 同步要拿到真错误，不能静默成功
+  }
 }
 
 export const act = {
@@ -159,13 +280,17 @@ export const act = {
     try {
       await saveNow();
       S.proj = normalize(await api('GET', `/api/projects/${id}`));
+      S.engineStyles = null;
+      S.engineFields = null;
+      S.codeBaseline = null;   // 新项目还没渲染，等渲染成功后从新代码取基线
+      S.snapshot = { has: false, stale: false, changeCount: 0, scopes: { styles: 0, fields: 0 }, summary: [], hint: '' };
       S.styleId = S.proj.styles[0]?.id || null;
       S.panel = null;
       S.view = 'editor';
       syncHash(id);
       await act.loadProjects();
       await act.loadModels();
-      await act.loadSnapshot();
+      await act.loadLock();   // 打开 / 刷新页面一律未锁（锁是纯前端状态，不继承）
     } catch (e) {
       toast('打开失败: ' + e.message, true);
       syncHash(null);
@@ -176,8 +301,11 @@ export const act = {
     await saveNow();
     S.view = 'home';
     S.proj = null;
-    S.snapshot = { has: false, at: '', label: '', version: '', stale: false, changeCount: 0,
-      scopes: { settings: 0, styles: 0, fields: 0 }, summary: [], hint: '' };
+    applyLock(null);
+    S.engineStyles = null;
+    S.engineFields = null;
+    S.codeBaseline = null;
+    S.snapshot = { has: false, stale: false, changeCount: 0, scopes: { styles: 0, fields: 0 }, summary: [], hint: '' };
     syncHash(null);
     await act.loadProjects();
   },
@@ -207,85 +335,135 @@ export const act = {
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
     await api('PUT', `/api/projects/${S.proj.id}/preview.png`, buf, true);
   },
-  /* ---- 配置快照（属性 + 字段 + 样式）----
-   * 快照由服务端存进 project.json 的 snapshot 字段；这里只维护对账状态。
-   * stale=true：快照之后配置改过 → 代码大概率还是按旧配置写的，发布前要提醒重新生成 */
-  async loadSnapshot() {
-    if (!S.proj) return null;
-    try {
-      const d = await api('GET', `/api/projects/${S.proj.id}/snapshot`);
-      S.snapshot = {
-        has: !!d.hasSnapshot,
-        at: (d.snapshot && d.snapshot.at) || '',
-        label: (d.snapshot && d.snapshot.label) || '',
-        version: (d.snapshot && d.snapshot.version) || '',
-        stale: !!d.stale,
-        changeCount: d.changeCount || 0,
-        scopes: d.scopes || { settings: 0, styles: 0, fields: 0 },
-        summary: d.summary || [],
-        hint: d.hint || '',
-      };
-      return S.snapshot;
-    } catch (e) { return null; }
-  },
-  async takeSnapshot(label) {
-    if (!S.proj) return null;
-    await saveNow();   // 面板改动是防抖保存的，先落盘再记快照，否则记到的是旧值
-    const d = await api('PUT', `/api/projects/${S.proj.id}/snapshot`, { label: label || '' });
-    await act.loadSnapshot();
-    toast(d.replaced ? '已用当前配置覆盖旧快照' : '已记录配置快照');
-    return d;
+  /* ---- 配置漂移（内存 vs 代码基线）----
+   * 基线在渲染成功时从 def._baseline 取（代码解析后、合并 JSON 前的深拷贝），
+   * 不再落盘快照；点徽标「以当前内存为准」= 重置基线、清掉已变更标记。 */
+  rebaseline() {
+    if (!S.engineStyles && !S.engineFields) { toast('还没有渲染过，没有可记的基准', true); return; }
+    S.codeBaseline = {
+      styles: JSON.parse(JSON.stringify(S.engineStyles || [])),
+      fields: JSON.parse(JSON.stringify(S.engineFields || [])),
+    };
+    refreshDrift();
+    toast('已把当前配置记为新基准');
   },
   copyStyle(id) {
+    if (denyWhenLocked()) return null;
     if (!S.proj) return null;
-    const src = S.proj.styles.find((s) => s.id === id) || curStyle();
+    const list = engineList();
+    const src = list.find((s) => s.id === id) || curStyle();
     if (!src) return null;
-    const copy = JSON.parse(JSON.stringify(src));
-    copy.id = 'style' + (S.proj.styles.length + 1) + '_' + Math.random().toString(36).slice(2, 5);
+    /* 保留函数属性（背景样式的 apply 是渲染主体，JSON 克隆会丢掉） */
+    const copy = {};
+    for (const k in src) {
+      copy[k] = k === 'options' ? JSON.parse(JSON.stringify(src.options || [])) : src[k];
+    }
+    copy.id = 'style' + (list.length + 1) + '_' + Math.random().toString(36).slice(2, 5);
     copy.name = (src.name || src.id) + ' 副本';
-    S.proj.styles.push(copy);
+    /* 项目配置（基础层，持久化）+ 引擎内存（respawn 立即生效）两边都加 */
+    const plain = JSON.parse(JSON.stringify({
+      id: copy.id, name: copy.name, z: copy.z, labelOffset: copy.labelOffset,
+      refresh: copy.refresh, icon: copy.icon, desc: copy.desc, options: copy.options,
+    }));
+    S.proj.styles.push(plain);
+    if (S.engineStyles) S.engineStyles.push(copy);
     S.styleId = copy.id;    // 切到副本上编辑
     scheduleSave();
     toast('已复制样式为「' + copy.name + '」');
     return copy;
   },
+  /* 删除样式：项目配置与引擎内存里都直接摘掉（配置是唯一事实源，代码里仍声明也不会复活） */
   removeStyle(id) {
+    if (denyWhenLocked()) return false;
     if (!S.proj) return false;
-    if (S.proj.styles.length <= 1) { toast('至少保留一个样式', true); return false; }
-    const i = S.proj.styles.findIndex((s) => s.id === id);
-    if (i < 0) return false;
-    S.proj.styles.splice(i, 1);
-    if (S.styleId === id) S.styleId = S.proj.styles[0].id;
+    if (engineList().length <= 1) { toast('至少保留一个样式', true); return false; }
+    const list = S.proj.styles || [];
+    const i = list.findIndex((x) => x && x.id === id);
+    if (i >= 0) list.splice(i, 1);
+    if (S.engineStyles) {
+      const j = S.engineStyles.findIndex((s) => s && s.id === id);
+      if (j >= 0) S.engineStyles.splice(j, 1);
+    }
+    if (S.styleId === id) {
+      const rest = engineList();
+      S.styleId = rest[0] ? rest[0].id : null;
+    }
     scheduleSave();
     return true;
   },
+  /* 删除一条样式参数：内存与项目配置里同时摘掉（没填 key 的草稿条目只在内存里） */
+  removeOption(styleId, opt) {
+    if (denyWhenLocked()) return;
+    if (!S.proj || !opt) return;
+    const s = engineList().find((x) => x && x.id === styleId);
+    if (s && Array.isArray(s.options)) {
+      const i = s.options.indexOf(opt);
+      if (i >= 0) s.options.splice(i, 1);
+    }
+    if (opt.key) {
+      const ps = (S.proj.styles || []).find((x) => x && x.id === styleId);
+      if (ps && Array.isArray(ps.options)) {
+        const j = ps.options.findIndex((o) => o && o.key === opt.key);
+        if (j >= 0) ps.options.splice(j, 1);
+      }
+    }
+    scheduleSave();
+  },
+  /* 删除字段：同 removeOption 口径（内存 + 项目配置同时摘掉） */
+  removeField(f) {
+    if (denyWhenLocked()) return;
+    if (!S.proj || !f) return;
+    if (S.engineFields) {
+      const i = S.engineFields.indexOf(f);
+      if (i >= 0) S.engineFields.splice(i, 1);
+    }
+    const list = S.proj.fields || [];
+    const j = f.key ? list.findIndex((x) => x && x.key === f.key) : list.indexOf(f);
+    if (j >= 0) list.splice(j, 1);
+    scheduleSave();
+  },
   addField() {
-    S.proj.fields.push({
-      key: '', label: '', domains: [], placeholder: '', tip: '',
-      valueType: 'text', enumValues: [],
-    });
+    if (denyWhenLocked()) return;
+    const f = { key: '', label: '', domains: [], placeholder: '', tip: '', valueType: 'text', enumValues: [] };
+    S.proj.fields.push(f);
+    /* 同一对象进内存 def.fields：字段编辑既立即生效又直接持久化 */
+    if (S.engineFields) S.engineFields.push(f);
     scheduleSave();
   },
   addOption() {
+    if (denyWhenLocked()) return;
     const st = curStyle();
     if (!st) return;
-    st.options.push({ key: '', label: '', type: 'range', def: '', min: 0, max: 1, step: 0.1, choices: [], tip: '' });
+    const o = { key: '', label: '', type: 'range', def: '', min: 0, max: 1, step: 0.1, choices: [], tip: '' };
+    /* 项目配置里有这个样式 → 参数进 JSON（基础层，持久化）；内存同步加，respawn 立即可调 */
+    const ps = (S.proj.styles || []).find((x) => x && x.id === st.id);
+    if (ps) {
+      if (!Array.isArray(ps.options)) ps.options = [];
+      ps.options.push(o);
+    }
+    if (!Array.isArray(st.options)) st.options = [];
+    st.options.push(o);
     scheduleSave();
   },
   /* 背景插件：一键加上 ha-3d-home 插件引擎保留的偏移参数（与 home 的 K.offsetOpts() 定义保持一致，
    * 见 ha-3d-home/public/js/plugins.js）。已有同名 key 的跳过，不重复添加。 */
   addOffsetOpts() {
+    if (denyWhenLocked()) return;
     const st = curStyle();
     if (!st) return;
-    if (!Array.isArray(st.options)) st.options = [];
     const defs = [
       { key: 'offsetX', label: '东西偏移', type: 'range', min: -30, max: 30, step: 0.5, def: 0, tip: '房屋在背景画面里东/西偏多少米（+西 = 往右拖背景左移，房屋相对偏东）' },
       { key: 'offsetZ', label: '南北偏移', type: 'range', min: -30, max: 30, step: 0.5, def: 0, tip: '房屋在背景画面里南/北偏多少米（+北 = 往右拖背景上移，房屋相对偏南）' },
     ];
+    const ps = (S.proj.styles || []).find((x) => x && x.id === st.id);
+    if (ps && !Array.isArray(ps.options)) ps.options = [];
+    if (!Array.isArray(st.options)) st.options = [];
     let added = 0;
     defs.forEach((o) => {
       if (st.options.some((x) => x && x.key === o.key)) return;
-      st.options.push(JSON.parse(JSON.stringify(o)));
+      const copy = JSON.parse(JSON.stringify(o));
+      if (ps) ps.options.push(copy);
+      st.options.push(copy);
       added++;
     });
     if (!added) { toast('当前样式已包含偏移参数', true); return; }
@@ -293,6 +471,7 @@ export const act = {
     toast('已添加偏移参数（offsetX / offsetZ）');
   },
   async importFile(file) {
+    if (denyWhenLocked()) return;
     if (!S.proj) return;
     const buf = await file.arrayBuffer();
     await api('PUT', `/api/projects/${S.proj.id}/models/${encodeURIComponent(file.name)}`, buf, true);
@@ -306,6 +485,18 @@ export const act = {
     }
     if (ok) toast(`已导入 ${ok} 个模型`);
   },
+  /* ---- 配置锁（纯前端）---- */
+  /* 打开项目 / 刷新页面时调用：一律从未锁开始，避免「一进来就锁着、再也解不开」 */
+  async loadLock() {
+    applyLock(null);
+  },
+  /* 人点按钮改锁：只改当前页面状态，不写服务端、不广播（刷新即恢复可编辑） */
+  async setLock(locked) {
+    if (S.lock.locked === !!locked) return;
+    applyLock({ locked: !!locked, by: 'user', at: Date.now(), note: '' });
+    if (S.lock.locked) toast('配置已锁定：左侧面板转为只读，避免和 AI 同时改配置');
+    else { S.saveState = ''; toast('配置已解锁：可以手动编辑了'); }
+  },
   /* ---- 模型文件库 ---- */
   async loadModels() {
     if (!S.proj) { S.models = []; return; }
@@ -313,6 +504,7 @@ export const act = {
     catch (e) { S.models = []; }
   },
   async deleteModel(file) {
+    if (denyWhenLocked()) return;
     if (!S.proj) return;
     try { await api('DELETE', `/api/projects/${S.proj.id}/models/${encodeURIComponent(file)}`); } catch (e) { toast('删除失败: ' + e.message, true); }
 
@@ -335,6 +527,7 @@ export const act = {
   },
   /* 文件库中直接拆分多节点 GLB：服务端把每个 node 导出为独立 .glb 加入文件库（不动画布部件） */
   async splitModelFile(file) {
+    if (denyWhenLocked()) return;
     if (!S.proj) return;
     try {
       const r = await api('POST', `/api/projects/${S.proj.id}/models/${encodeURIComponent(file)}/split`);
@@ -346,6 +539,7 @@ export const act = {
   },
   /* 文件库：只把指定节点导出为一个独立 .glb（原文件不动，画布部件不受影响） */
   async splitModelNode(file, nodeName) {
+    if (denyWhenLocked()) return;
     if (!S.proj) return;
     try {
       const r = await api('POST', `/api/projects/${S.proj.id}/models/${encodeURIComponent(file)}/split`, { node: nodeName });
@@ -363,8 +557,6 @@ export const act = {
       const d = await api('POST', `/api/projects/${S.proj.id}/publish`, { bump });
       if (S.proj) S.proj.plugin.version = d.manifest.version;
       bigToast('发布成功', `已安装到 ${d.host}（v${d.manifest.version}${d.copied.length ? '，模型 ' + d.copied.length + ' 个' : ''}）`);
-      /* 发布时会顺带算一次配置漂移，回来刷新顶栏快照状态 */
-      if (d.drift) await act.loadSnapshot();
     } finally {
       S.publishing = false;
     }
@@ -388,14 +580,7 @@ export const act = {
       a.download = mm ? mm[1] : (S.proj.plugin.id + '.zip');
       a.click();
       URL.revokeObjectURL(a.href);
-      /* 服务端打包时也算了一次漂移（兜底：前端点击前没查到的情形） */
-      const driftCount = Number(r.headers.get('X-Config-Drift-Count') || 0);
-      if (r.headers.get('X-Config-Drift') === '1') {
-        toast(`已导出 ${a.download}（提示：配置有 ${driftCount} 处改动未重新生成，包内还是旧效果）`, true);
-      } else {
-        toast('已导出 ' + a.download);
-      }
-      await act.loadSnapshot();
+      toast('已导出 ' + a.download);
     } finally {
       S.publishing = false;
     }

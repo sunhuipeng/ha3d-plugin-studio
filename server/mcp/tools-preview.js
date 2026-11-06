@@ -205,6 +205,40 @@ function register(server) {
     },
   );
 
+  /* ---------------- 重新渲染 ---------------- */
+  server.tool(
+    'studio_render',
+    '立刻重新渲染当前项目：重新执行插件代码、按当前项目配置（styles / fields）合并后重建场景，返回渲染结果（样式、实体、参数实际取值）。'
+    + 'studio_sync_config 之后画面没跟上、或想确认当前配置的渲染效果时调它；只重渲不写盘。'
+    + 'refreshConfig=true 时先按服务器 project.json 重贴内存配置（手改过 JSON 的场合）；不会刷新整个页面（那用 studio_reload）',
+    {
+      projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
+      view: z.enum(['iso', 'front', 'back', 'left', 'right', 'top', 'low', 'detail']).optional()
+        .describe('渲染后套用的视角预设（缺省保持当前视角）'),
+      refreshConfig: z.boolean().optional().describe('先从服务器重读 project.json 的 styles / fields / 代码，再渲染'),
+    },
+    async ({ projectId, view, refreshConfig }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const st = await hub.call(pid, 'render', { view, refreshConfig }, 90000);
+        const r = st || {};
+        return H.text({
+          ok: r.ok !== false,
+          projectId: pid,
+          error: r.error || '',
+          plugin: { id: r.pluginId || '', kind: r.kind || '', type: r.type || '', name: r.name || '' },
+          style: { current: r.styleId || '', all: r.styles || [] },
+          size: r.size || null,
+          label: r.label || '',
+          entities: (r.entities || []).map((e) => ({ entityId: e.entityId, role: e.role, state: e.state })),
+          instance: r.instance || null,
+        });
+      } catch (e) {
+        return H.fail(H.friendlyRelayError(e, '浏览器里的页面还是旧版本前端，请刷新编辑页后重试'));
+      }
+    },
+  );
+
   /* ---------------- 运行期体检 ---------------- */
   server.tool(
     'studio_get_runtime',

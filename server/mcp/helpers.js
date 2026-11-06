@@ -2,9 +2,10 @@
  *
  * 目录结构：
  *   mcp/helpers.js         ← 本文件：输出格式 / 项目 id 解析 / 分项输出 / glb 解析 / 活动横条
- *   mcp/tools-config.js    get_project / snapshot / get_code / write_code
+ *   mcp/tools-config.js    get_project / get_code / write_code
  *   mcp/tools-preview.js   set_style / set_option / click / label / reload / view / screenshot / set_entity / get_runtime
  *   mcp/tools-projects.js  list_projects / where / single_window / open_project
+ *   mcp/tools-lock.js      lock_config / unlock_config / get_lock（前端只读锁，服务端只中继）
  *   mcp/tools-models.js    upload / get / list / split / delete / rename / fix_model_materials
  *   mcp/tools-publish.js   export_project / publish_project
  *   ../mcp-tools.js        装配入口（buildMcpServer）
@@ -16,7 +17,6 @@ const path = require('path');
 const { modelsDir, readProject, safeId, listModels } = require('../config');
 const { normalizeOptionType } = require('../option-schema');
 const { normalizeFieldType, normalizeEnumValues, splitList } = require('../field-schema');
-const { briefSnapshot } = require('../config-snapshot');
 const hub = require('../ws-hub');
 
 /* ---- 工具返回值 ---- */
@@ -134,8 +134,6 @@ function projectConfig(p, pid) {
     settings: settingsOut(p),
     styles: stylesOut(p),
     fields: fieldsOut(p),
-    /* 配置快照对账：stale=true 表示配置在快照之后改过，代码大概率还是按旧配置写的 */
-    snapshot: briefSnapshot(p),
     models: modelsOut(pid),
     code: {
       source: 'customJs',

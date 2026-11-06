@@ -27,7 +27,18 @@ const projectDir = (id) => path.join(PROJECTS_DIR, id);
 const projectFile = (id) => path.join(projectDir(id), 'project.json');
 const modelsDir = (id) => path.join(projectDir(id), 'models');
 
-const readProject = (id) => JSON.parse(fs.readFileSync(projectFile(id), 'utf8'));
+/* 老项目兼容：门/窗原先的 kind:'opening' 已废除 → 统一成 kind:'device' + type 'door'/'window'
+ * （home 侧同一口径：kind 只剩 device / background，门窗靠 type 区分）。
+ * 读盘时归一，REST / MCP / 导出 / 预览拿到的都是新口径；下次保存自然写回新值。 */
+function normalizeProject(proj) {
+  const p = proj && proj.plugin;
+  if (p) {
+    if (p.kind === 'opening' || !p.kind) p.kind = 'device';
+  }
+  return proj;
+}
+
+const readProject = (id) => normalizeProject(JSON.parse(fs.readFileSync(projectFile(id), 'utf8')));
 const writeProject = (id, proj) => {
   ensureDir(projectDir(id));
   proj.updatedAt = new Date().toISOString();

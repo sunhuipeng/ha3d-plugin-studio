@@ -4,11 +4,10 @@
  *   { type:'tool', id, name, args }  → 本地执行 → { type:'tool_result', id, ok, result }
  * 服务端还可能发：
  *   { type:'refresh', what:'models' }                                → 局部刷新模型列表
- *   { type:'refresh', what:'snapshot' }                               → MCP 记录/清除配置快照，刷新顶栏徽标
  *   { type:'mcp', event:'connected'|'activity'|'disconnected', tool? } → 顶部横条提示
  */
 import { watch } from 'vue';
-import { S, act, api, viewportApi } from './store';
+import { S, act, api, viewportApi, engineList, scheduleSave, applyLock, toast } from './store';
 import { bumpModel } from './thumb';
 import { readRuntimeLog, runtimeLogStats, clearRuntimeLog, setRuntimeProjectGetter } from './runtime-log';
 
@@ -37,6 +36,7 @@ function hello() {
     visible: document.visibilityState === 'visible',
     focused: document.hasFocus(),
   });
+  /* 锁是纯前端状态：断线重连 / 切项目都不需要补拉，保持现状 */
 }
 
 /* 可见 / 聚焦状态上报：studio_single_window 靠它挑「用户正在看的那个标签页」 */
@@ -185,6 +185,12 @@ async function waitPreviewIdle(pv, timeout = 20000) {
   while (pv.loading && pv.loading() && Date.now() - t0 < timeout) await sleep(90);
 }
 
+/* ---------------- 配置双写：清单即事实源 ----------------
+ * 传了 styles 就整表替换样式（每条参数也整条替换），传了 fields 就整表替换字段。
+ * 不做墓碑、不做 merge：清单里没有的条目就是没有了 —— 重渲时也不会从代码里并回来，
+ * 因为配置才是结构来源，代码只提供同 id 的渲染函数（见 engine/project-config.js）。 */
+const cloneList = (list) => JSON.parse(JSON.stringify(Array.isArray(list) ? list : []));
+
 /* ---------------- 可被 MCP 调用的前端能力 ----------------
  * 代码 → 运行 → 摆姿态 → 看图 → 改状态 → 切样式这一条闭环。
  * 实体、部件、造型信息都写在插件代码里，不需要单独查询。
@@ -256,6 +262,102 @@ const handlers = {
     return info;
   },
 
+  /* 直接重渲当前项目：重新执行代码 + 按当前项目配置合并。
+   * 用在：sync_config 之后想立刻把画面刷新、或改完配置想确认渲染效果。
+   * refreshConfig=true → 先按服务器上的 project.json 重贴内存配置（手改过 JSON 的场合） */
+  render: async (args = {}) => {
+    const a = args || {};
+    if (!S.proj) throw new Error('当前没有打开的项目');
+    const stage = await ensurePreviewStage();
+    await waitPreviewIdle(stage);
+    if (a.refreshConfig) {
+      const fresh = await api('GET', `/api/projects/${S.proj.id}`);
+      if (fresh) {
+        if (typeof fresh.customJs === 'string') S.proj.customJs = fresh.customJs;
+        if (Array.isArray(fresh.styles)) S.proj.styles = fresh.styles;
+        if (Array.isArray(fresh.fields)) S.proj.fields = fresh.fields;
+      }
+    }
+    /* skipSave：这里只是重渲，不该顺手把内存配置写盘（写盘是 sync_config / 保存的职责） */
+    const st = await stage.refresh({ view: a.view, skipSave: true });
+    const info = st || stage.describe();
+    if (!info || info.ok === false) throw new Error((info && info.error) || '渲染失败');
+    return info;
+  },
+
+  /* 运行期配置双写：styles / fields 直接按 MCP 传参覆盖（前端内存 + 服务端 JSON）。
+   *
+   *   ① S.proj.styles / fields ← 参数清单（整表替换，参数也整条替换）
+   *   ② stage.refresh() 让引擎按新配置重建 → 样式/字段 tab、胶囊、画面一起换新
+   *   ③ PUT 整个 S.proj 落盘（渲染成败都落盘：配置是主目标，渲染失败只进 warn）
+   *
+   * ⚠ saveNow 会把整个 S.proj PUT 回去，所以落盘前必须先把磁盘上的 customJs 取回来：
+   *   若 AI 刚 write_code 但 run_code 失败（页面没开），内存里还是旧代码，直接保存会把新代码冲掉。 */
+  sync_config: async (args = {}) => {
+    const a = args || {};
+    if (!S.proj) throw new Error('当前没有打开的项目');
+    const hasStyles = Array.isArray(a.styles);
+    const hasFields = Array.isArray(a.fields);
+    if (!hasStyles && !hasFields) throw new Error('请至少传 styles 或 fields（最终版清单）');
+    const stage = await ensurePreviewStage();
+    await waitPreviewIdle(stage);
+
+    let fresh;
+    try { fresh = await api('GET', `/api/projects/${S.proj.id}`); }
+    catch (e) { throw new Error('读不到项目，未落盘（避免用旧代码覆盖磁盘）: ' + e.message); }
+    if (!fresh || typeof fresh.customJs !== 'string') throw new Error('项目读取异常，未落盘');
+    S.proj.customJs = fresh.customJs;
+
+    /* 配置这一半：清单即事实源，整表替换 */
+    if (hasStyles) S.proj.styles = cloneList(a.styles);
+    if (hasFields) S.proj.fields = cloneList(a.fields);
+    if (hasStyles && S.styleId && !S.proj.styles.some((s) => s && s.id === S.styleId)) {
+      S.styleId = (S.proj.styles[0] && S.proj.styles[0].id) || '';
+    }
+
+    /* 渲染这一半：重新执行代码并按新配置重建 → tab / 胶囊 / 引擎一起换新。
+     * skipSave：refresh 内部默认会先保存一次，那一步会用「旧引擎镜像」覆盖刚写进内存的
+     * 新配置，必须跳过，改由本方法最后落盘 */
+    const warn = [];
+    const renderInfo = await stage.refresh({ skipSave: true });
+    const renderOk = !!(renderInfo && renderInfo.ok !== false);
+    if (!renderOk) {
+      warn.push('配置已保存，但页面没能按新配置重渲染：'
+        + ((renderInfo && renderInfo.error) || '未知原因')
+        + '。修好代码后重渲即生效');
+    }
+
+    /* 落盘：直接写这份清单，不走 saveNow 的「引擎镜像 → JSON」回推，
+     * 否则渲染失败时会把刚写进内存的配置又覆盖回旧值 */
+    await api('PUT', `/api/projects/${S.proj.id}`, { project: S.proj });
+    S.saveState = '已保存 ✓';
+
+    return {
+      projectId: S.proj.id,
+      savedAt: new Date().toISOString(),
+      render: {
+        ok: renderOk,
+        ...(renderOk ? {} : { error: (renderInfo && renderInfo.error) || '' }),
+      },
+      warn,
+      styles: (S.proj.styles || []).map((s) => ({
+        id: s.id,
+        name: s.name || s.id,
+        options: (s.options || []).filter((o) => o && o.key).map((o) => o.key),
+      })),
+      fields: (S.proj.fields || []).map((f) => ({ key: f.key, label: f.label || f.key })),
+      /* tab 里看到的（引擎内存）——服务端拿它和磁盘比。
+       * 重渲失败时引擎还是上一版，比了只会误导：不回传，让服务端说明未校验 */
+      runtime: renderOk ? {
+        styles: (S.engineStyles || []).map((s) => ({
+          id: s.id,
+          options: (s.options || []).map((o) => (o && typeof o === 'object' ? o.key : o)).filter(Boolean),
+        })),
+        fields: (S.engineFields || []).map((f) => f.key),
+      } : null,
+    };
+  },
+
   /* 只摆姿态不出图：转模型 / 移模型 / 归位 / 转相机，返回当前机位与模型姿态 */
   view: async (args = {}) => {
     const a = args || {};
@@ -296,27 +398,41 @@ const handlers = {
     return { entity: st, label: pv.labelText(), entities: pv.listEntities() };
   },
 
-  /* 切换样式：S.styleId 变更会触发 PluginStage 的 watch → 重渲 */
+  /* 配置锁（纯前端状态，见 store.applyLock）：MCP 想锁住用户手改时调这里，
+   * 只影响当前这个页面，刷新即恢复。不传 locked = 只查状态。 */
+  lock: async ({ locked, note } = {}) => {
+    if (locked === undefined) {
+      return { locked: S.lock.locked, by: S.lock.by, note: S.lock.note, at: S.lock.at };
+    }
+    const was = S.lock.locked;
+    applyLock({ locked: !!locked, by: 'mcp', at: Date.now(), note: note || '' });
+    if (was !== S.lock.locked && S.lock.locked) {
+      toast('AI 锁定了配置：左侧面板转为只读（刷新页面即可恢复）');
+    }
+    return { locked: S.lock.locked, by: S.lock.by, note: S.lock.note, at: S.lock.at };
+  },
+
+  /* 切换样式：S.styleId 变更会触发 PluginStage 的 watch → 快速重生（respawn） */
   set_style: async ({ styleId } = {}) => {
     if (!S.proj) throw new Error('当前没有打开的项目');
     if (!styleId) throw new Error('缺少 styleId');
-    const hit = (S.proj.styles || []).find((s) => s && s.id === styleId);
+    const hit = engineList().find((s) => s && s.id === styleId);
     if (!hit) throw new Error('样式不存在: ' + styleId + '（可用 studio_get_project 查）');
     const pv = await ensurePreviewStage();
     S.styleId = styleId;
-    await sleep(250);          // 等 watch 触发 refresh
+    await sleep(250);          // 等 watch 触发重生
     await waitPreviewIdle(pv);
     const info = pv.describe();
     if (!info || info.ok === false) throw new Error((info && info.error) || '渲染失败');
     return info;
   },
 
-  /* 样式参数调节（MCP 自动核验用）：写 styles[].options[].def → 软重渲 → 回读实际生效值。
-   * 参数值的唯一来源就是样式 schema 上的 def（引擎用它合并出 ctx.options），
-   * 所以这里改 def 就等于在左下卡片上拖滑条。不传 key = 只读当前样式的全部参数值。 */
+  /* 样式参数调节（MCP 自动核验用）：写内存 def 的 options[].def → 快速重生 → 回读实际生效值。
+   * 数据源是引擎运行后的内存样式（engineList），改的就是预览正在用的那份，
+   * respawn 不重新执行代码、不重置实体状态。不传 key = 只读当前样式的全部参数值。 */
   set_option: async ({ styleId, key, value } = {}) => {
     if (!S.proj) throw new Error('当前没有打开的项目');
-    const styles = S.proj.styles || [];
+    const styles = engineList();
     if (!styles.length) throw new Error('项目没有任何样式（先用面板建一个样式）');
     const style = styleId
       ? styles.find((s) => s && s.id === styleId)
@@ -336,13 +452,17 @@ const handlers = {
     const from = opt.def;
     const to = coerceOptionValue(opt, value);
     opt.def = to;
+    scheduleSave();   // 改的是内存 def：保存时全量覆盖回项目 JSON，这里触发防抖落盘
 
-    /* 参数变了必须重跑代码（ctx.options 是 spawn 时合并出的快照），不能只 update()。
-     * 实体状态不用管：preview.load 会先快照再推回去（改参数不至于把「灯已开」清成 off） */
+    /* 快速重生（respawn）：内存新值直接生效；不可用时回退全量渲染 */
     const pv = await ensurePreviewStage();
     await waitPreviewIdle(pv);
-    let st = await pv.refresh({});
-    for (let i = 0; i < 8 && !st; i++) { await sleep(200); st = await pv.refresh({}); }
+    let st = null;
+    try { st = await pv.respawn({ styleId: style.id }); } catch (e) { st = null; }
+    if (!st) {
+      st = await pv.refresh({});
+      for (let i = 0; i < 8 && !st; i++) { await sleep(200); st = await pv.refresh({}); }
+    }
     if (!st || st.ok === false) throw new Error((st && st.error) || '重渲失败');
     await sleep(120);
     st = pv.describe() || st;
@@ -363,7 +483,7 @@ const handlers = {
     const pv = await ensurePreviewStage();
     await waitPreviewIdle(pv);
     const d = pv.describe();
-    if (d.kind !== 'device') throw new Error('当前不是设备类插件（kind=' + (d.kind || '?') + '），没有点击控制');
+    if (d.kind !== 'device') throw new Error('当前是背景插件（kind=' + (d.kind || '?') + '），没有点击控制');
     const before = pv.isOnNow();
     const ent = pv.toggleDevice();
     if (!ent) throw new Error('点击没生效：插件未声明可用的 click 配置（或没有主实体）');
@@ -501,10 +621,6 @@ async function onMessage(ev) {
         if (pid) (Array.isArray(msg.files) ? msg.files : []).forEach((f) => bumpModel(pid, f));
       }
       try { await act.loadModels(); } catch (e) { /* ignore */ }
-    }
-    else if (msg.what === 'snapshot' && S.proj) {
-      /* MCP 记录 / 清除了配置快照 → 刷新顶栏徽标 */
-      act.loadSnapshot();
     }
     /* what:'code' 不再在这里渲染：写代码的工具会直接转发 run_code 并等待结果，
        这里若再跑一次 saveNow() 反而会用前端旧数据覆盖服务端刚写入的代码。 */

@@ -153,9 +153,16 @@ function fmtTime(iso) {
   } catch (e) { return iso || ''; }
 }
 
-/* ---- 插件类型角标文案：kind 主类型 + 设备/门窗的细分 type（背景的 type 是开关，不展示） ---- */
-const KIND_NAMES = { device: '设备', opening: '门窗', background: '背景' };
-const TYPE_NAMES = { light: '灯', switch: '开关', door: '门', window: '窗' };
+/* ---- 插件类型角标文案：只有两类（device 含门/窗、background）----
+ * 门/窗已并入设备类（kind:'device' + type 'door'/'window'），与普通设备同一格式：
+ * 设备 · 门 / 设备 · 窗，不再单独显示「门窗」一类。背景类不细分 type。 */
+const KIND_NAMES = { device: '设备', background: '背景' };
+const TYPE_NAMES = {
+  light: '灯', switch: '开关', fan: '风扇', cover: '窗帘', climate: '空调',
+  water_heater: '热水器', media_player: '音箱', vacuum: '扫地机', camera: '摄像头',
+  sensor: '传感器', other: '设备',
+  door: '门', window: '窗',
+};
 function kindLabel(p) {
   const kind = KIND_NAMES[p.kind] || p.kind;
   const type = TYPE_NAMES[p.type] || p.type;
@@ -179,7 +186,7 @@ function kindLabel(p) {
             <div class="card-view">
               <img v-if="!pvMissing[p.id]" :src="pvUrl(p)" alt="" @error="pvMissing[p.id] = true">
               <div v-else class="view-fallback"></div>
-              <!-- 插件类型角标：设备/门窗/背景（+ 细分 type，背景不细分） -->
+              <!-- 插件类型角标：设备（含门/窗细分）/ 背景，与「只有两类插件」的口径一致 -->
               <span v-if="p.kind" class="kind-badge">{{ kindLabel(p) }}</span>
             </div>
 

@@ -9,7 +9,8 @@
  *   · 任意视角离屏截图（供 MCP 观察）
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
-import { S, act, api, saveNow, scheduleSave, viewportApi, toast } from '../store';
+import { Lock, Unlock } from '@element-plus/icons-vue';
+import { S, act, api, saveNow, scheduleSave, viewportApi, toast, engineList, syncEngineMirror } from '../store';
 import { ThreeHost, VIEW_PRESETS } from '../engine/three-host';
 import { PluginPreview } from '../engine/plugin-preview';
 import { normalizeOptions } from '../option-schema';
@@ -23,6 +24,16 @@ const err = ref('');
 const view = ref('iso');
 const grid = ref(true);
 const axes = ref(false);
+
+/* 配置锁：锁定后左侧所有浮层面板只读，避免人和 AI 同时改配置互相覆盖。
+ * 纯前端状态（S.lock），不写服务端 —— 刷新页面即自动解锁，不会锁死。 */
+const lockOn = computed(() => S.lock.locked);
+const lockTitle = computed(() => (lockOn.value
+  ? '配置已锁定（' + (S.lock.by === 'mcp' ? 'AI 锁定' : '你锁定') + '）：左侧面板只读，点击解锁'
+  : '锁定配置：左侧面板转为只读（刷新页面即解锁）'));
+function toggleLock() {
+  act.setLock(!S.lock.locked).catch((e) => toast(e.message, true));
+}
 const status = computed(() => S.previewStatus);   // 单一数据源：S.previewStatus（PlanInset/CodePanel 也读它）
 const entities = ref([]);
 /* 样式参数只有一个来源：项目 styles[].options[].def（AI 代码里写死的不作依据，
@@ -32,7 +43,9 @@ let host = null;
 let preview = null;
 let disposed = false;
 
-const styles = computed(() => (S.proj && S.proj.styles) || []);
+/* 样式列表与当前样式：读引擎运行后的内存镜像（AI 代码声明什么就显示什么），
+ * 没渲染过 / 渲染失败时由 engineList 回落项目配置 */
+const styles = computed(() => engineList());
 const curStyle = computed(() => styles.value.find((x) => x.id === S.styleId) || null);
 const curStyleName = computed(() => (curStyle.value ? (curStyle.value.name || curStyle.value.id) : ''));
 
@@ -40,31 +53,43 @@ const curStyleName = computed(() => (curStyle.value ? (curStyle.value.name || cu
 const pluginKind = computed(() =>
   (status.value && status.value.kind)
   || (S.proj && S.proj.plugin && S.proj.plugin.kind) || '');
-/* 门窗不是「设备」，没有主实体：状态全部来自字段（门磁 / 开门比例）。
-   引擎为了兜底造了个 binary_sensor.preview_main，面板上不显示它 */
-const isOpening = computed(() => pluginKind.value === 'opening');
+/* 类型键：门/窗是 device 类里的贴墙类型（kind 同为 'device'），靠 type 区分 */
+const pluginType = computed(() =>
+  (status.value && status.value.type)
+  || (S.proj && S.proj.plugin && S.proj.plugin.type) || '');
+/* 门/窗没有「主实体」：状态全部来自字段（门磁 / 开门比例），
+   引擎把 entityId 指向门磁字段只为了让插件能跑，面板上不显示成主实体 */
+const isWall = computed(() => pluginType.value === 'door' || pluginType.value === 'window');
+/* 门的离地高度固定 0（贴地不可调），窗可以调 */
+const isDoor = computed(() => pluginType.value === 'door');
 /* 背景插件：左下角卡片换成「安全范围」参数 —— 长×宽（米），可输入 / 滚轮快速调整 */
 const isBg = computed(() => pluginKind.value === 'background');
-/* 设备类：左下角多一张「样式」卡片（离地高度 / 标签高度，存 styles 里） */
+/* 设备类（含门/窗）：左下角多一张「样式」卡片（离地高度 / 标签高度，存 styles 里） */
 const isDevice = computed(() => pluginKind.value === 'device');
 
-/* ---------------- 左下角「样式」卡片（设备类） ----------------
- * 卡片里改的是 styles 上存的两项元信息（定义层，和左侧「样式」面板同一份数据）：
- *   z            离地高度（米）
- *   labelOffset  标签高度（米）——状态标签相对「设备接地点」的距地高度，清空 = 贴模型顶面
+/* ---------------- 左下角「样式」卡片（设备类 + 背景类） ----------------
+ * 卡片里改的是 styles 上存的元信息（定义层，和左侧「样式」面板同一份数据）：
+ *   z            离地高度（米，设备类）
+ *   labelOffset  标签高度（米，设备类）——状态标签相对「设备接地点」的距地高度，清空 = 贴模型顶面
+ *   refresh      刷新率（Hz，背景类）——0 / 留空 = 静态只画一次，引擎上限 30
  * 只写数据（项目 JSON 自动保存），不做任何引擎侧改造：预览标签本身每帧按当前样式的
  * labelOffset 定位，所以把同一个值镜像到 preview.style 上就能即时看到。
- * ⚠ z 目前只是存数据，预览里怎么「抬起设备」等引擎侧方案定了再接。 */
+ * z 在 respawn 时由 _makeObj 读 style.z 算进 obj.z，再由 plugin-preview 的
+ * _applyGroundLift 抬实例 group（300ms 防抖快速重生，设备立刻升降）。 */
 const metaZ = ref(0);
 const metaLabel = ref('');
+const metaRefresh = ref(null);
 function syncStyleMeta() {
   const st = curStyle.value;
   metaZ.value = Number(st && st.z) || 0;
   const lo = st && st.labelOffset;
   metaLabel.value = (lo === undefined || lo === null || lo === '') ? '' : Number(lo);
+  const rf = st && st.refresh;
+  metaRefresh.value = (rf === undefined || rf === null || rf === '') ? null : Number(rf);
 }
 let metaTimer = null;
 const clampMeta = (n) => Math.round(Math.max(0, Math.min(10, n)) * 100) / 100;
+const clampRefresh = (n) => Math.round(Math.max(0, Math.min(30, n)));
 /* 预览锁着的样式对象（plugin-preview.style）与项目里的样式是两份数据：
    写项目那份负责存盘，同步一份给预览负责即时生效（只在组件侧赋值，不动引擎） */
 function applyStyleMetaToPreview() {
@@ -77,10 +102,30 @@ function setMeta(key, raw) {
   const st = curStyle.value;
   if (!st) return;
   if (key === 'z') {
+    /* 门恒贴地：离地高度不可调（与 home 的属性面板一致），避免写进 style.z 造成数据歧义 */
+    if (isDoor.value) return;
     const n = Number(raw);
     if (!isFinite(n)) return;
     metaZ.value = clampMeta(n);
     st.z = metaZ.value;
+    /* 离地高度影响实例摆放（obj.z 在 spawn 时读 style.z）：防抖快速重生让设备立刻升降。
+     * 存盘不能靠 respawn 带上（它只重建实例不落盘），必须自己挂 scheduleSave */
+    scheduleSave();
+    clearTimeout(metaTimer);
+    metaTimer = setTimeout(() => { if (!disposed) refreshOpts(); }, 300);
+    return;
+  } else if (key === 'refresh') {
+    /* 背景刷新率：整数 0..30；清空 = 静态（删除键，回引擎缺省）。改频率影响引擎调度，
+       快速重生一次让新频率立即生效（不重新执行代码）；同样要自己挂存盘 */
+    const empty = raw === '' || raw === null || raw === undefined;
+    const n = Number(raw);
+    if (!empty && !isFinite(n)) return;
+    metaRefresh.value = empty ? null : clampRefresh(n);
+    if (empty) delete st.refresh; else st.refresh = metaRefresh.value;
+    scheduleSave();
+    clearTimeout(metaTimer);
+    metaTimer = setTimeout(() => { if (!disposed) refreshOpts(); }, 600);
+    return;
   } else {
     const empty = raw === '' || raw === null || raw === undefined;
     const n = Number(raw);
@@ -89,11 +134,16 @@ function setMeta(key, raw) {
     if (v == null) delete st.labelOffset; else st.labelOffset = v;
   }
   applyStyleMetaToPreview();
-  /* 连续输入时防抖存盘（这两项不影响几何，不用重渲） */
-  clearTimeout(metaTimer);
-  metaTimer = setTimeout(() => { if (!disposed) scheduleSave(); }, 300);
+  /* 连续输入时 scheduleSave 自带 900ms 防抖，直接挂即可（之前用 metaTimer 300ms
+   * 转一手，和 z / refresh 的重渲定时器共用一个句柄，会互相取消导致改动丢失） */
+  scheduleSave();
 }
 function wheelMeta(key, e) {
+  if (key === 'refresh') {
+    const base = Number.isFinite(Number(metaRefresh.value)) ? Number(metaRefresh.value) : 0;
+    setMeta('refresh', base + (e.deltaY < 0 ? 1 : -1));
+    return;
+  }
   const cur = key === 'z' ? metaZ.value : (metaLabel.value === '' ? '' : Number(metaLabel.value));
   const base = Number.isFinite(Number(cur)) ? Number(cur) : 0;
   setMeta(key, base + (e.deltaY < 0 ? 0.05 : -0.05));
@@ -177,14 +227,12 @@ async function syncHouseSize() {
 }
 
 /* ---------------- 样式参数 options（左下角卡片，各家插件通用） ----------------
- * 取值只有一个来源：当前样式 options 的 def（项目数据）。
- *   · 卡片里改值 → 写回 def，随自动保存落盘（左侧「样式」面板同步）；
- *   · 左侧面板里改 def → 卡片跟着变，并防抖重绘预览。
- * 引擎注册时会用项目 styles 覆盖代码里写死的常量，所以改 def 就是改画面。
- * 背景的 offsetX/offsetZ 走「先平移 group 再软重渲」的快路径，其它参数统一软重渲。 */
+ * 取值来源：当前样式 options 的 def（引擎内存，AI 声明 + 存档恢复）。
+ *   · 卡片里改值 → 写内存 def，respawn 快速生效，随自动保存全量落盘（原流程保留）；
+ *   · 左侧「样式 / 字段」面板里的改动只存数据、不触发重渲 —— 改完点「重新渲染」看效果。
+ * 背景的 offsetX/offsetZ 走「先平移 group 再软重渲」的快路径，其它参数统一 respawn。 */
 let bgOptTimer = null;
 let optsRetry = null;   // 预览忙时的补渲定时器：拖滑条会把多次重渲挤掉，最后一次不能丢
-let optsTouch = 0;   // setStyleOpt 刚写回 def 的时间戳：def 监听据此跳过自己触发的变更
 
 /* 读某个参数在当前样式里的最新值（刚写回 def，用这份而不是本地快照） */
 function optValue(key) {
@@ -198,7 +246,6 @@ function setStyleOpt(o, v) {
   const list = (curStyle.value && curStyle.value.options) || [];
   const opt = list[o._idx] || (o.key ? list.find((x) => x && x.key === o.key) : null);
   if (opt) { opt.def = v; scheduleSave(); }
-  optsTouch = Date.now();
   if (!o.key) return;
   clearTimeout(bgOptTimer);
   if (isBg.value && (o.key === 'offsetX' || o.key === 'offsetZ')) {
@@ -211,30 +258,29 @@ function setStyleOpt(o, v) {
     bgOptTimer = setTimeout(refreshOpts, 120);
   }
 }
-/* options 实时预览：复用 lastCode 重跑 spawn（背景 apply 重画、设备重建几何，几十 ms），不走服务端 */
+/* options / 元信息实时预览：快速重生（respawn）—— 不重新执行 AI 代码，只重建实例：
+ * 内存 def 上的新参数值直接生效，实体状态保留、相机不动（画面不跳）。
+ * respawn 不可用（还没成功渲染过）或失败时回退全量渲染。 */
 async function refreshOpts() {
   if (!S.proj || !preview || busy.value || preview.loading || disposed) {
     /* 上一次渲染还没结束（拖滑条时很常见）：稍后补渲一次，别把最后一次改动丢掉 */
     if (!disposed) { clearTimeout(optsRetry); optsRetry = setTimeout(refreshOpts, 250); }
     return;
   }
-  if (!lastCode) return refresh(view.value);
+  if (!preview.def) return refresh(view.value);
   err.value = '';
   try {
-    const st = await preview.load({
-      project: S.proj,
-      code: lastCode,
+    const st = await preview.respawn({
       styleId: S.styleId,
-      view: view.value,
       safeW: isBg.value ? safeSize.value.w : undefined,
       safeD: isBg.value ? safeSize.value.d : undefined,
     });
     entities.value = preview.listEntities();
     S.previewStatus = st;
-    applyStyleMetaToPreview();   // 软重渲会重建样式对象，把卡片值贴回去
+    applyStyleMetaToPreview();
   } catch (e) {
-    err.value = e.message || String(e);
-    S.previewStatus = { ok: false, error: err.value };
+    /* respawn 失败（def 已失效等）→ 全量渲染兜底 */
+    return refresh(view.value);
   }
 }
 /* select 的 option value 在 DOM 里会变成字符串：按 schema 里的原始类型还回去 */
@@ -244,7 +290,7 @@ function castChoice(o, v) {
 }
 const shownEntities = computed(() => {
   const list = entities.value || [];
-  return isOpening.value ? list.filter((e) => e.role !== 'main') : list;
+  return isWall.value ? list.filter((e) => e.role !== 'main') : list;
 });
 
 /* 插件自己算出来的状态文案（门插件：已关闭 / 开 50% / 已打开） */
@@ -252,18 +298,21 @@ const effectText = computed(() => (status.value && status.value.label) || '');
 
 /* ---------------- 主链路 ---------------- */
 let lastCode = '';          // 最近一次构建出的 plugin.js：options 实时预览用它软重渲，不再打服务端
-async function loadCode() {
-  await saveNow();
+async function loadCode(opts) {
+  /* 重渲前的保存是为了把面板里刚改的配置写盘再取代码。
+   * 但 sync_config 是自己先把「最终版配置」写进内存再要求重渲的，那时引擎镜像还是旧的，
+   * 这一步保存会用旧镜像把新配置覆盖掉 —— 所以它传 skipSave 跳过（渲染成功后自己保存） */
+  if (!opts || !opts.skipSave) await saveNow();
   const d = await api('GET', `/api/projects/${S.proj.id}/build`);
   return d.js;
 }
 
-async function refresh(viewName) {
+async function refresh(viewName, opts) {
   if (!S.proj || !preview || busy.value) return null;
   busy.value = true;
   err.value = '';
   try {
-    const code = await loadCode();
+    const code = await loadCode(opts);
     lastCode = code;
     const st = await preview.load({
       project: S.proj,
@@ -275,6 +324,7 @@ async function refresh(viewName) {
     });
     entities.value = preview.listEntities();
     S.previewStatus = st;
+    syncEngineMirror(preview);   // 内存镜像换到新 def：UI（胶囊/面板/卡片）从现在起读引擎数据
     syncStyleMeta();
     applyStyleMetaToPreview();   // 重建后把卡片上的 z / 标签高度再贴回预览样式，重新渲染不回弹
     return st;
@@ -449,7 +499,14 @@ onMounted(async () => {
 
   /* 供 MCP / 其它面板调用 */
   viewportApi.pluginPreview = {
-    refresh: (o) => refresh((o && o.view) || view.value),
+    refresh: (o) => refresh((o && o.view) || view.value, o || {}),
+    /* 快速重生（MCP set_option 等用）：不重新执行代码，内存参数直接生效 */
+    respawn: async (o) => {
+      const st = await preview.respawn(Object.assign({ styleId: S.styleId }, o || {}));
+      entities.value = preview.listEntities();
+      S.previewStatus = st;
+      return st;
+    },
     screenshot: (o) => host.snapshot(o || {}),
     setCamera: (o) => { const r = host.setCamera(o || {}); syncStatus(); return r; },
     setView: (name) => { setView(name); return host.cameraState(); },
@@ -499,23 +556,19 @@ onBeforeUnmount(() => {
 watch(() => S.proj && S.proj.id, (id) => {
   if (id && !disposed) { loadSafeSize(); syncStyleMeta(); refresh(view.value).then(syncHouseSize); }
 });
-/* 切样式 → 参数 schema 换了，重新渲染（取值全部来自项目 def，没有需要带过去的状态） */
+/* 切样式 → 快速重生（内存 def 换个 style 条目重建实例，不重新执行代码）；
+ * 还没成功渲染过（无 def）时全量渲染 */
 watch(() => S.styleId, () => {
   syncStyleMeta();
-  if (!disposed) refresh(view.value);
+  if (disposed) return;
+  if (preview && preview.def) refreshOpts();
+  else refresh(view.value);
 });
-/* 左侧「样式」面板改 z / labelOffset → 卡片同步（同一份数据，反方向） */
-watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.value.labelOffset)],
+/* 左侧「样式」面板改 z / labelOffset / refresh → 卡片同步（同一份数据，反方向）。
+   只同步显示，不重渲 —— 面板改动统一靠「重新渲染」按钮生效 */
+watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.value.labelOffset),
+  (curStyle.value && curStyle.value.refresh)],
   () => { syncStyleMeta(); applyStyleMetaToPreview(); });
-
-/* 左侧面板里改 options 的 def（含新增/删除参数、改 key）→ 卡片值同步 + 防抖重绘预览。
- * setStyleOpt 自己写回 def 的变更在这里跳过（已按 key 走各自的实时预览路径）。 */
-let defTimer = null;
-watch(() => JSON.stringify(((curStyle.value && curStyle.value.options) || []).map((o) => o && [o.key, o.def])), () => {
-  if (disposed || Date.now() - optsTouch < 400) return;
-  clearTimeout(defTimer);
-  defTimer = setTimeout(() => { if (!disposed) refreshOpts(); }, 150);
-});
 </script>
 
 <template>
@@ -547,6 +600,13 @@ watch(() => JSON.stringify(((curStyle.value && curStyle.value.options) || []).ma
         <button class="pv-btn" title="按当前视角截图，保存为启动页预览图" @click="savePreviewShot">📷</button>
       </div>
 
+      <!-- 配置锁：独立分组（不和工具条 / 截图块并在一起）；锁定后左侧面板只读 -->
+      <div class="pv-lock-bar" :class="{ on: lockOn }">
+        <button class="pv-btn pv-lock-btn" :title="lockTitle" @click="toggleLock">
+          <el-icon :size="13"><Lock v-if="lockOn" /><Unlock v-else /></el-icon>
+        </button>
+      </div>
+
       <!-- 快速切样式：与左侧「样式」面板、面板顶部胶囊共用 S.styleId -->
       <div v-if="styles.length > 1" class="pv-styles-bar">
         <span class="pv-qs-label">样式</span>
@@ -555,28 +615,46 @@ watch(() => JSON.stringify(((curStyle.value && curStyle.value.options) || []).ma
       </div>
     </div>
 
-    <!-- 左下角卡片栈（从上到下）：样式(设备) → 样式参数(有 options 的都在) → 背景参数/预览状态 -->
+    <!-- 左下角卡片栈（从上到下）：样式(设备) → 样式参数(有 options 的都在) → 背景参数/预览状态。
+         配置锁只锁左侧 tab 浮层，中间编辑区（含这些卡片）照常可用 -->
     <div class="pv-bottomleft">
-    <!-- 样式：设备专属，存 styles 上的「离地高度 z」与「标签高度 labelOffset」 -->
-    <div v-if="isDevice" class="pv-entities">
+    <!-- 样式元信息：设备类（离地高度 / 标签高度）+ 背景类（刷新率 refresh），存 styles 上 -->
+    <div v-if="isDevice || isBg" class="pv-entities">
       <div class="pv-ent-head">样式<span class="pv-ent-cur">{{ curStyleName }}</span></div>
-      <div class="pv-ent pv-ent-safe" title="离地高度（米）：设备接地点相对地面的高度，0 = 落地">
-        <span class="pv-ent-name">离地高度</span>
-        <span class="pv-safe-inputs">
-          <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="10" step="0.05"
-            :value="metaZ" @input="setMeta('z', $event.target.value)"
-            @wheel.prevent="wheelMeta('z', $event)">m</label>
-        </span>
-      </div>
-      <div class="pv-ent pv-ent-safe" title="标签高度（米）：状态标签相对设备接地点的距地高度；清空 = 贴在模型顶面">
-        <span class="pv-ent-name">标签高度</span>
-        <span class="pv-safe-inputs">
-          <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="10" step="0.05"
-            :value="metaLabel" placeholder="模型顶" @input="setMeta('labelOffset', $event.target.value)"
-            @wheel.prevent="wheelMeta('labelOffset', $event)">m</label>
-        </span>
-      </div>
-      <div class="pv-ent-tip">输入或滚轮调整；改的是 styles 里存的样式元信息，随项目自动保存</div>
+      <template v-if="isDevice">
+        <div v-if="isDoor" class="pv-ent pv-ent-safe" title="门的离地高度固定 0（贴地），不可调；窗才按样式 z 抬起">
+          <span class="pv-ent-name">离地高度</span>
+          <span class="pv-safe-inputs">固定 0（门贴地）</span>
+        </div>
+        <div v-else class="pv-ent pv-ent-safe" title="离地高度（米）：设备/窗的接地面相对地面的高度，0 = 落地">
+          <span class="pv-ent-name">离地高度</span>
+          <span class="pv-safe-inputs">
+            <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="10" step="0.05"
+              :value="metaZ" @input="setMeta('z', $event.target.value)"
+              @wheel.prevent="wheelMeta('z', $event)">m</label>
+          </span>
+        </div>
+        <div class="pv-ent pv-ent-safe" title="标签高度（米）：状态标签相对设备接地点的距地高度；清空 = 贴在模型顶面">
+          <span class="pv-ent-name">标签高度</span>
+          <span class="pv-safe-inputs">
+            <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="10" step="0.05"
+              :value="metaLabel" placeholder="模型顶" @input="setMeta('labelOffset', $event.target.value)"
+              @wheel.prevent="wheelMeta('labelOffset', $event)">m</label>
+          </span>
+        </div>
+        <div class="pv-ent-tip">输入或滚轮调整；改的是 styles 里存的样式元信息，随项目自动保存</div>
+      </template>
+      <template v-else>
+        <div class="pv-ent pv-ent-safe" title="刷新率（Hz）：背景引擎按此频率回调 update(t, api)；0 / 清空 = 静态只画一次，引擎上限 30">
+          <span class="pv-ent-name">刷新率</span>
+          <span class="pv-safe-inputs">
+            <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="30" step="1"
+              :value="metaRefresh" placeholder="静态" @input="setMeta('refresh', $event.target.value)"
+              @wheel.prevent="wheelMeta('refresh', $event)">Hz</label>
+          </span>
+        </div>
+        <div class="pv-ent-tip">输入或滚轮调整；0 / 清空 = 静态，改后自动重渲预览</div>
+      </template>
     </div>
 
     <!-- 样式参数（options schema）：任何插件只要有 options 就展示，改值防抖后重绘预览。
