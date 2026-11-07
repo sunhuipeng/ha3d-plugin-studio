@@ -60,6 +60,13 @@ async function prepareExportZip(projectId, { bump = false } = {}) {
   /* 运行时注入 models：validate 的模型检查与打包都要用，不写回文件。
    * 注意必须先注入再 validate，否则「没有 GLB 模型」的警告恒误报 */
   proj.models = listModels(projectId);
+
+  /* 家具项目（catalog）不是插件：产物是 item.json + glb 的家具包，走 catalog-pkg.js */
+  if (proj.plugin && proj.plugin.kind === 'catalog') {
+    throw Object.assign(new Error('这是家具项目（catalog），不能导出/发布成插件包；请用「导出家具包」'),
+      { code: 'INVALID', warnings: [] });
+  }
+
   const warnings = validate(proj);
   const errs = warnings.filter((w) => w.level === 'error');
   if (errs.length) {

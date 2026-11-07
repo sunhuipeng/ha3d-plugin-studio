@@ -4,6 +4,7 @@ import { bumpModel } from './thumb';
 import { normalizeOptionType, stripExtraOptionKeys } from './option-schema';
 import { normalizeField } from './field-schema';
 import { diffConfig } from './config-diff';
+import { FALLBACK_CATALOG_TYPES, normalizeItem, newItemFromModel } from './catalog';
 
 /* 设备类插件（kind:'device'）可选的 type：
  *   DEVICE_TYPES —— HA 实体域（灯/开关/空调…）
@@ -64,6 +65,10 @@ export const S = reactive({
     summary: [], hint: '',
   },
   codeBaseline: null,   // { styles, fields } 纯数据；渲染成功后从 def._baseline 取
+  /* 家具项目（kind:'catalog'）分类下拉：来自 GET /catalog-types（studio 服务端优先向
+   * ha-3d-home 的 /api/catalog 取，取不到才用本地兜底表）。source = 'home' | 'fallback' */
+  catalogTypes: FALLBACK_CATALOG_TYPES.slice(),
+  catalogTypesSource: '',
 });
 
 /* 视口组件注册进来的能力（地面/归零等需要 three 场景） */
@@ -139,6 +144,16 @@ function normalize(proj) {
   if (!proj.plugin.kind) proj.plugin.kind = 'device';
   /* 背景类没有实体类型（面板里 type 输入框是隐藏的）：值统一固定成 'bg' */
   if (proj.plugin.kind === 'background') proj.plugin.type = 'bg';
+  /* 家具项目（kind:'catalog'）：结构与插件项目完全不同 —— 只有 catalog.items（一个 glb 一条），
+   * 没有样式 / 字段 / 代码 / 选项。这里提前返回，别把插件那套默认值灌进去。 */
+  if (proj.plugin.kind === 'catalog') {
+    proj.catalog = (proj.catalog && typeof proj.catalog === 'object') ? proj.catalog : {};
+    proj.catalog.items = (Array.isArray(proj.catalog.items) ? proj.catalog.items : [])
+      .filter((x) => x && typeof x === 'object').map(normalizeItem);
+    if (!proj.plugin.version) proj.plugin.version = '1.0.0';
+    delete proj.snapshot;
+    return proj;
+  }
   proj.styles ||= [{ id: 'default', name: proj.plugin.name || '默认造型', z: 0, icon: '', desc: '', options: [] }];
   for (const s of proj.styles) {
     if (!Array.isArray(s.options)) s.options = [];
@@ -270,8 +285,10 @@ export const act = {
     S.target = d;
     toast('发布目标已保存: ' + d.host);
   },
-  async newProject(name) {
-    const d = await api('POST', '/api/projects', { name: name || '未命名插件' });
+  /* 新建项目：kind 在创建时定死（device / background / catalog），之后不可改 */
+  async newProject(name, kind) {
+    const k = kind || 'device';
+    const d = await api('POST', '/api/projects', { name: name || '未命名项目', kind: k });
     await act.loadProjects();
     await act.openProject(d.project.id);
     toast('项目已创建');
@@ -284,12 +301,14 @@ export const act = {
       S.engineFields = null;
       S.codeBaseline = null;   // 新项目还没渲染，等渲染成功后从新代码取基线
       S.snapshot = { has: false, stale: false, changeCount: 0, scopes: { styles: 0, fields: 0 }, summary: [], hint: '' };
-      S.styleId = S.proj.styles[0]?.id || null;
+      /* 家具项目没有 styles（normalize 提前返回），这里不能裸取 [0] */
+      S.styleId = (Array.isArray(S.proj.styles) && S.proj.styles[0] && S.proj.styles[0].id) || null;
       S.panel = null;
       S.view = 'editor';
       syncHash(id);
       await act.loadProjects();
       await act.loadModels();
+      if (S.proj.plugin.kind === 'catalog') act.loadCatalogTypes().catch(() => {});
       await act.loadLock();   // 打开 / 刷新页面一律未锁（锁是纯前端状态，不继承）
     } catch (e) {
       toast('打开失败: ' + e.message, true);
@@ -547,6 +566,79 @@ export const act = {
       toast(`已把节点「${r.node}」导出为 ${r.files[0].file}（原文件保留）`);
     } catch (e) {
       toast('拆分失败: ' + e.message, true);
+    }
+  },
+  /* ---- 家具项目（kind: 'catalog'）：清单在 proj.catalog.items，一个 glb 一条 ---- */
+  async loadCatalogTypes() {
+    try {
+      const d = await api('GET', '/api/catalog-types');
+      if (Array.isArray(d.types) && d.types.length) {
+        S.catalogTypes = d.types;
+        S.catalogTypesSource = d.source || '';
+      }
+    } catch (e) { /* home 没连上也别拦着：用兜底表 */ }
+  },
+  catalogItems() {
+    return (S.proj && S.proj.catalog && Array.isArray(S.proj.catalog.items)) ? S.proj.catalog.items : [];
+  },
+  /* 模型导入后调用：按文件名生成条目 id / 显示名，尺寸用实测包围盒（没有就默认值）
+   * displayName 可传原始文件名（上传时文件名会被 ASCII 化，展示名仍用用户看到的那份） */
+  addCatalogItem(file, size, displayName) {
+    if (!S.proj || !S.proj.plugin || S.proj.plugin.kind !== 'catalog') return null;
+    S.proj.catalog ||= {};
+    if (!Array.isArray(S.proj.catalog.items)) S.proj.catalog.items = [];
+    const taken = new Set(S.proj.catalog.items.map((x) => x && x.id));
+    const it = newItemFromModel(file, size, taken);
+    if (displayName) it.name = String(displayName).slice(0, 40);
+    S.proj.catalog.items.push(it);
+    scheduleSave();
+    return it;
+  },
+  removeCatalogItem(id) {
+    if (!S.proj || !S.proj.catalog || !Array.isArray(S.proj.catalog.items)) return;
+    const list = S.proj.catalog.items;
+    const i = list.findIndex((x) => x && x.id === id);
+    if (i < 0) return;
+    list.splice(i, 1);
+    scheduleSave();
+  },
+  /* 条目换了模型文件：id 不跟着变（已导出的包靠 id 稳定），只改引用 */
+  /* 导出家具包：item.json + 各条目引用的 glb（home 侧直接「导入插件」或用远程安装） */
+  async catalogExport() {
+    if (S.publishing || !S.proj) return;
+    S.publishing = true;
+    try {
+      await saveNow();
+      const r = await fetch(`/api/projects/${S.proj.id}/export-catalog`);
+      if (!r.ok) {
+        let m = await r.text();
+        try { m = JSON.parse(m).error || m; } catch (e) { /* 原样展示 */ }
+        throw new Error(m);
+      }
+      const blob = await r.blob();
+      const mm = /filename="?([^";]+)"?/.exec(r.headers.get('Content-Disposition') || '');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = mm ? mm[1] : (S.proj.id + '.zip');
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast('已导出 ' + a.download);
+    } finally {
+      S.publishing = false;
+    }
+  },
+  /* 发布家具包到 ha-3d-home：走同一个远程安装接口，home 按 kind 分流到 custom/models/<项目id>/ */
+  async catalogPublish(bump) {
+    if (S.publishing || !S.proj) return;
+    S.publishing = true;
+    try {
+      await saveNow();
+      const d = await api('POST', `/api/projects/${S.proj.id}/publish-catalog`, { bump: !!bump });
+      if (S.proj) S.proj.plugin.version = d.manifest.version;
+      S.saveState = '已保存 ✓';
+      bigToast('发布成功', `已安装到 ${d.host}（${d.count} 件家具，v${d.manifest.version}）`);
+    } finally {
+      S.publishing = false;
     }
   },
   async publish(bump) {

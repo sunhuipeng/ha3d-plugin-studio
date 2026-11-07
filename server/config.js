@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { normalizeCatalog } = require('./catalog-schema');
 
 const ROOT = path.join(__dirname, '..');
 /* 端口与数据目录支持环境变量覆盖（Docker 部署用，对齐 ha-3d-home 的约定）：
@@ -28,13 +29,16 @@ const projectFile = (id) => path.join(projectDir(id), 'project.json');
 const modelsDir = (id) => path.join(projectDir(id), 'models');
 
 /* 老项目兼容：门/窗原先的 kind:'opening' 已废除 → 统一成 kind:'device' + type 'door'/'window'
- * （home 侧同一口径：kind 只剩 device / background，门窗靠 type 区分）。
- * 读盘时归一，REST / MCP / 导出 / 预览拿到的都是新口径；下次保存自然写回新值。 */
+ * （home 侧同一口径：kind 有 device / background / catalog 三类，门窗靠 type 区分）。
+ * 读盘时归一，REST / MCP / 导出 / 预览拿到的都是新口径；下次保存自然写回新值。
+ * kind 在项目创建时确定、之后不可改（PUT 时由 routes 比对磁盘值拒绝变更）。 */
 function normalizeProject(proj) {
   const p = proj && proj.plugin;
   if (p) {
     if (p.kind === 'opening' || !p.kind) p.kind = 'device';
   }
+  /* 家具项目（catalog）：条目数组补齐默认值，缺失的 catalog 结构就地建出来 */
+  if (p && p.kind === 'catalog') normalizeCatalog(proj);
   return proj;
 }
 
@@ -81,6 +85,8 @@ function listProjectSummaries() {
         pluginId: (pr.plugin && pr.plugin.id) || '',
         kind: (pr.plugin && pr.plugin.kind) || '',
         type: (pr.plugin && pr.plugin.type) || '',
+        /* 家具项目：卡片角标显示件数 */
+        items: (pr.catalog && Array.isArray(pr.catalog.items)) ? pr.catalog.items.length : 0,
         models: listModels(d).length,
       });
     } catch (e) { /* 跳过损坏的项目目录 */ }

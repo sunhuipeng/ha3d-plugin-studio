@@ -11,6 +11,8 @@ const {
   listProjectSummaries,
 } = require('./config');
 const { buildAll, validate } = require('./generator');
+const { newCatalogProject, normalizeCatalog, FALLBACK_TYPES, TYPE_LABELS } = require('./catalog-schema');
+const { prepareCatalogExport, publishCatalog } = require('./catalog-pkg');
 const JSZip = require('jszip');
 const { prepareExportZip, buildProjectZip } = require('./plugin-pkg');
 const { fixGlbMaterials } = require('./fixglb');
@@ -54,23 +56,44 @@ api.get('/projects', (req, res) => {
   const items = listProjectSummaries().map((it) => {
     let hasCustomJs = false;
     try { hasCustomJs = String(readProject(it.id).customJs || '').trim() !== ''; } catch (e) { /* skip */ }
-    return { id: it.id, name: it.name, updatedAt: it.updatedAt, models: it.models, pluginId: it.pluginId, hasCustomJs, kind: it.kind, type: it.type };
+    return {
+      id: it.id, name: it.name, updatedAt: it.updatedAt, models: it.models,
+      pluginId: it.pluginId, hasCustomJs, kind: it.kind, type: it.type,
+      /* 家具项目：卡片角标显示件数 */
+      items: it.items || 0,
+    };
   });
   res.json({ items });
 });
 
+/* 新建项目：kind 在这里定死（device / background / catalog），之后不允许改
+ * —— 两类项目的数据结构与编辑页完全不同，中途切换只会丢配置。 */
 api.post('/projects', (req, res) => {
   const id = 'p' + crypto.randomBytes(4).toString('hex');
-  const proj = {
-    id,
-    name: String(req.body.name || '未命名插件').slice(0, 60),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    plugin: { id, name: req.body.name || '未命名插件', kind: 'device', type: 'switch', version: '1.0.0', description: '' },
-    styles: [{ id: 'default', name: '默认造型', z: 0, icon: '', desc: '' }],
-    fields: [],
-    customJs: '',
-  };
+  const kind = String(req.body.kind || 'device').trim().toLowerCase();
+  if (kind !== 'device' && kind !== 'background' && kind !== 'catalog') {
+    return res.status(400).json({ error: 'kind 只能是 device（设备/门窗）、background（背景）或 catalog（家具包）' });
+  }
+  const name = String(req.body.name || '').slice(0, 60);
+  let proj;
+  if (kind === 'catalog') {
+    proj = newCatalogProject(id, name || '未命名家具包');
+  } else {
+    proj = {
+      id,
+      name: name || '未命名插件',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      plugin: {
+        id, name: name || '未命名插件', kind,
+        type: kind === 'background' ? 'bg' : 'switch',
+        version: '1.0.0', description: '',
+      },
+      styles: [{ id: 'default', name: '默认造型', z: 0, icon: '', desc: '' }],
+      fields: [],
+      customJs: '',
+    };
+  }
   writeProject(id, proj);
   res.json({ ok: true, project: proj });
 });
@@ -111,9 +134,26 @@ api.get('/projects/:id', (req, res) => {
   catch (e) { res.status(404).json({ error: 'project not found' }); }
 });
 
+/* 保存项目：kind 一律以磁盘为准（创建后不可改），变更请求直接 409。
+ * 家具项目（catalog）落盘前归一 items（补默认值）。 */
 api.put('/projects/:id', (req, res) => {
   const proj = req.body.project || req.body;
   if (!proj || proj.id !== req.params.id) return res.status(400).json({ error: 'project id mismatch' });
+
+  let prev = null;
+  try { prev = readProject(req.params.id); } catch (e) { /* 不存在就当作首次写入 */ }
+  if (prev && prev.plugin && proj.plugin) {
+    const kPrev = String(prev.plugin.kind || '');
+    const kNext = String(proj.plugin.kind || '') || kPrev;
+    if (kPrev && kNext !== kPrev) {
+      return res.status(409).json({
+        error: `项目类型（kind）创建后不可更改：当前是 ${kPrev}，不能改成 ${kNext}`,
+      });
+    }
+    if (kPrev) proj.plugin.kind = kPrev;
+  }
+  if (proj.plugin && proj.plugin.kind === 'catalog') normalizeCatalog(proj);
+
   writeProject(req.params.id, proj);
   res.json({ ok: true });
 });
@@ -164,6 +204,29 @@ api.get('/home/house', async (req, res) => {
   } catch (e) {
     res.json({ ok: false, error: '无法连接 ha-3d-home: ' + (e && e.message || e) });
   }
+});
+
+/* 家具分类枚举：优先取 ha-3d-home 的 GET /api/catalog（它的 types 是唯一出处），
+ * home 不可达时回落本机兜底表 —— 保证家具编辑页的分类下拉永远可用，且能跟 home 对齐。 */
+api.get('/catalog-types', async (req, res) => {
+  const remote = remoteTarget();
+  const norm = (list) => list.map((t) => {
+    if (t && typeof t === 'object') return { type: String(t.type || ''), name: String(t.name || t.type || '') };
+    return { type: String(t || ''), name: String(t || '') };
+  }).filter((t) => t.type);
+
+  if (remote.host) {
+    try {
+      const r = await fetch(remote.host.replace(/\/+$/, '') + '/api/catalog', { signal: AbortSignal.timeout(4000) });
+      const d = await r.json().catch(() => ({}));
+      const list = norm(Array.isArray(d.types) ? d.types : []);
+      if (r.ok && list.length) return res.json({ ok: true, source: 'home', host: remote.host, types: list });
+    } catch (e) { /* home 没起来就用兜底 */ }
+  }
+  res.json({
+    ok: true, source: 'fallback', host: remote.host || '',
+    types: FALLBACK_TYPES.map((t) => ({ type: t, name: TYPE_LABELS[t] || t })),
+  });
 });
 
 /* ---- 项目预览图（启动页卡片用） ----
@@ -329,6 +392,35 @@ api.post('/projects/:id/publish', async (req, res) => {
   try {
     const { manifest, copied, remote } = await publishProject(pid, !!req.body.bump);
     res.json({ ok: true, host: remote.host, pluginId: manifest.id, manifest, copied });
+  } catch (e) {
+    if (e.code === 'NOT_FOUND') return res.status(404).json({ error: 'project not found' });
+    if (e.code === 'INVALID') return res.status(400).json({ error: e.message, warnings: e.warnings });
+    res.status(502).json({ error: e.message });
+  }
+});
+
+/* ---- 家具包（kind: catalog）：导出 / 发布 ----
+ * 产物是 ha-3d-home 的家具包格式（item.json + 多个平铺 glb），与插件包完全是两套东西：
+ * 走独立端点，插件端点在遇到 catalog 项目时直接 400 指路。 */
+api.get('/projects/:id/export-catalog', async (req, res) => {
+  let r;
+  try { r = await prepareCatalogExport(req.params.id, {}); }
+  catch (e) {
+    if (e.code === 'NOT_FOUND') return res.status(404).json({ error: 'project not found' });
+    if (e.code === 'INVALID') return res.status(400).json({ error: e.message, warnings: e.warnings });
+    return res.status(500).json({ error: e.message });
+  }
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeId(req.params.id) || 'catalog'}-v${r.manifest.version}.zip"`);
+  res.send(r.buf);
+});
+
+api.post('/projects/:id/publish-catalog', async (req, res) => {
+  const pid = req.params.id;
+  if (!safeId(pid)) return res.status(400).json({ error: 'project id invalid' });
+  try {
+    const { manifest, copied, remote } = await publishCatalog(pid, !!(req.body && req.body.bump));
+    res.json({ ok: true, host: remote.host, manifest, copied, count: manifest.items.length });
   } catch (e) {
     if (e.code === 'NOT_FOUND') return res.status(404).json({ error: 'project not found' });
     if (e.code === 'INVALID') return res.status(400).json({ error: e.message, warnings: e.warnings });

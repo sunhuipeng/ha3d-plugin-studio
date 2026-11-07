@@ -5,7 +5,12 @@ import Home from './components/Home.vue';
 import LeftRail from './components/LeftRail.vue';
 import PluginStage from './components/PluginStage.vue';
 import RightPanel from './components/RightPanel.vue';
+import CatalogEditor from './components/CatalogEditor.vue';
 import { initWs } from './ws-client';
+
+/* 家具项目（kind: catalog）走独立的编辑页：没有代码/实体/样式，只有清单 + 预览 + 属性。
+ * 两类编辑页完全分开：插件那套（LeftRail + PluginStage + RightPanel）不掺任何 catalog 分支。 */
+const isCatalog = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.kind === 'catalog'));
 
 /* 建立与 Node 服务端的 WebSocket 中继（MCP 工具调用走这条链路） */
 initWs();
@@ -94,7 +99,10 @@ function onPublishCmd(cmd) {
     <!-- 启动页: 项目列表 -->
     <Home v-if="S.view === 'home'" />
 
-    <!-- 编辑开发页 -->
+    <!-- 家具项目（kind: catalog）：独立编辑页，自带顶栏与发布/导出 -->
+    <CatalogEditor v-else-if="S.proj && isCatalog" :key="'cat-' + S.proj.id" />
+
+    <!-- 插件编辑开发页 -->
     <template v-else>
       <header id="topbar">
         <el-button size="small" @click="onBack">← 项目</el-button>

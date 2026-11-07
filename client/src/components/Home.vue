@@ -8,13 +8,28 @@ import { ElMessage } from 'element-plus';
 import { Plus, Setting, Upload } from '@element-plus/icons-vue';
 import { S, act } from '../store';
 
-/* ---- 新建项目（虚线卡片 → 弹窗输入名称） ---- */
+/* ---- 新建项目（虚线卡片 → 弹窗：先选类型 kind，再填名称） ----
+ * kind 在建项目时定死，之后不可改 —— 两类的数据结构与编辑页完全不同：
+ *   device    设备类（含门/窗）→ 插件编辑页（样式 / 字段 / 代码 / 3D 调试）
+ *   background 背景（户外地面等）→ 同上
+ *   catalog   家具包（一个项目多个 GLB）→ 家具编辑页（清单 + 预览 + 发布整包） */
 const createVisible = ref(false);
 const newName = ref('');
+const newKind = ref('device');
+const CREATE_KINDS = [
+  { kind: 'device', title: '设备插件', desc: '灯 / 开关 / 空调 / 门 / 窗…，带实体绑定与样式参数' },
+  { kind: 'background', title: '背景插件', desc: '户外地面、庭院铺装等铺在户型外围的 3D 背景' },
+  { kind: 'catalog', title: '家具包', desc: '一次导入多个 GLB，每件家具一条描述，整包发布到 home' },
+];
+function openCreate() {
+  newName.value = '';
+  newKind.value = 'device';
+  createVisible.value = true;
+}
 async function doCreate() {
   const name = newName.value.trim();
   if (!name) { ElMessage.warning('请输入项目名称'); return; }
-  try { await act.newProject(name); createVisible.value = false; newName.value = ''; }
+  try { await act.newProject(name, newKind.value); createVisible.value = false; newName.value = ''; }
   catch (e) { ElMessage.error(e.message); }
 }
 
@@ -153,10 +168,10 @@ function fmtTime(iso) {
   } catch (e) { return iso || ''; }
 }
 
-/* ---- 插件类型角标文案：只有两类（device 含门/窗、background）----
- * 门/窗已并入设备类（kind:'device' + type 'door'/'window'），与普通设备同一格式：
- * 设备 · 门 / 设备 · 窗，不再单独显示「门窗」一类。背景类不细分 type。 */
-const KIND_NAMES = { device: '设备', background: '背景' };
+/* ---- 卡片角标文案：设备类（device 含门/窗）、背景、家具包 ----
+ * 门/窗已并入设备类（kind:'device' + type 'door'/'window'）：设备 · 门 / 设备 · 窗；
+ * 家具包显示件数（catalog.items 数量，服务端列表接口一并返回） */
+const KIND_NAMES = { device: '设备', background: '背景', catalog: '家具包' };
 const TYPE_NAMES = {
   light: '灯', switch: '开关', fan: '风扇', cover: '窗帘', climate: '空调',
   water_heater: '热水器', media_player: '音箱', vacuum: '扫地机', camera: '摄像头',
@@ -164,6 +179,7 @@ const TYPE_NAMES = {
   door: '门', window: '窗',
 };
 function kindLabel(p) {
+  if (p.kind === 'catalog') return '家具包 · ' + (p.items || 0) + ' 件';
   const kind = KIND_NAMES[p.kind] || p.kind;
   const type = TYPE_NAMES[p.type] || p.type;
   return (p.kind === 'background' || !type) ? kind : `${kind} · ${type}`;
@@ -208,14 +224,14 @@ function kindLabel(p) {
           </div>
 
           <!-- 新建项目: 矩形虚线框中间一个 + 号 -->
-          <div class="card card-new" @click="createVisible = true">
+          <div class="card card-new" @click="openCreate">
             <el-icon class="new-plus"><Plus /></el-icon>
             <div class="new-text">新建项目</div>
           </div>
         </div>
 
         <div v-if="!S.projects.length" class="empty hint">
-          还没有插件项目，点击上方虚线框新建一个
+          还没有项目，点击上方虚线框新建一个
         </div>
       </div>
     </main>
@@ -231,9 +247,17 @@ function kindLabel(p) {
       <el-icon :size="22"><Setting /></el-icon>
     </div>
 
-    <!-- 新建项目弹窗 -->
-    <el-dialog v-model="createVisible" title="新建插件项目" width="420px">
-      <el-input v-model="newName" placeholder="项目名称，如：卧室吊灯" @keydown.enter="doCreate" autofocus />
+    <!-- 新建项目弹窗：先选类型（创建后不可改），再填名称 -->
+    <el-dialog v-model="createVisible" title="新建项目" width="520px">
+      <div class="kind-pick">
+        <button v-for="k in CREATE_KINDS" :key="k.kind" type="button" class="kind-opt"
+                :class="{ on: newKind === k.kind }" @click="newKind = k.kind">
+          <b>{{ k.title }}</b>
+          <span>{{ k.desc }}</span>
+        </button>
+      </div>
+      <p class="hint" style="margin: 8px 0 10px">项目类型创建后不可更改（两类项目的编辑页与产物完全不同）</p>
+      <el-input v-model="newName" placeholder="项目名称，如：卧室吊灯 / 客厅家具套装" @keydown.enter="doCreate" autofocus />
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
         <el-button type="primary" @click="doCreate">创建</el-button>
@@ -359,4 +383,17 @@ function kindLabel(p) {
 <!-- 设置弹窗挂在 body 下（el-dialog 传送门），scoped 够不到，单独全局样式 -->
 <style>
 .tgt-input .el-input-group__prepend { width: 84px; justify-content: center; }
+
+/* 新建项目弹窗里的类型选择（el-dialog 传送门同样需要全局样式） */
+.kind-pick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 4px; }
+.kind-opt {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; cursor: pointer;
+  font: inherit; padding: 10px 11px; border-radius: 10px; background: var(--bg2);
+  border: 1px solid var(--line); color: var(--fg); transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.kind-opt b { font-size: 13px; }
+.kind-opt span { font-size: 11px; color: var(--fg-dim); line-height: 1.45; }
+.kind-opt:hover { border-color: var(--accent); background: #f6faff; }
+.kind-opt.on { border-color: var(--accent); background: rgba(47,127,224,.08); box-shadow: 0 0 0 1px var(--accent) inset; }
+.kind-opt.on b { color: var(--accent); }
 </style>

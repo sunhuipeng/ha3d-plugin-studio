@@ -104,14 +104,26 @@ AI 生成的 `plugin.js` 里常把 `styles` / `options` 写死（生成那一刻
 - **发布 / 导出**：打包产物就是项目里那份原始代码（AI 输出什么样就打包什么样，**不包配置注入层**）。配置与代码的一致性由开发流程保障：AI 按快照照抄配置 + 面板改动后重新生成；页面预览用的 `GET /api/projects/:id/build` 同样返回原始代码，所以代码面板里看到的就是打包出来的那份。
 - **前提**：代码逻辑必须读 `ctx.options.<key>`（而不是写死常量），否则在面板/卡片里调参数不会影响画面。
 
-### 5. 两种插件类型
+### 5. 三种项目类型（kind 创建时选定，之后不可改）
 
 | kind | 典型设备 | 特点 |
 | --- | --- | --- |
 | `device` 设备（**含门/窗**） | 灯、开关、风扇、摄像头、传感器…；门 / 窗用 `type: 'door'` / `'window'` | 实体状态驱动造型变化（亮灭 / 开关 / 巡视 / 开合）；支持点击交互（click 配置）与悬浮状态标签；plan2d 绘制平面图标。门/窗是「贴墙设备」：`kind` 同样是 `device`，只是 `type` 不同、默认不显示 3D 标签、门的离地高度固定 0 |
 | `background` 背景 | 草地、沙滩、马路、院子… | `apply(ctx)` 直接返回渲染好的 3D 内容（`{ group }`），不调用 model3d / plan2d；用「安全范围」长宽占位盒代替房屋体块，范围内禁止放置物品。`ctx.house` / `ctx.safe` 与 ha-3d-home 同口径：原点 = 背景中心，`offsetX/offsetZ`（房屋相对背景中心的偏移）先算进 house/safe，背景 group 再摆到「房屋中心 − 偏移」，占位盒钉在世界原点 |
+| `catalog` 家具包 | 沙发、床、桌椅、柜子… | **一个项目 = 一个家具包**：导入多个 GLB，每个模型一条描述（名称 / 分类 / 尺寸 / 兜底色），整包发布到 ha-3d-home 的 `custom/models/<项目id>/`。走**独立编辑页**（`CatalogEditor.vue`：清单 + 3D 预览 + 属性），不涉及样式 / 字段 / 代码 |
 
 > **开/合判定只有一个入口**：插件在 register 顶层声明 `isOn(obj, get)`（设备与门/窗共用）。`click` 只描述「点下去发什么服务」（`on` / `off` / `label` / `defaultOn`），不再有 `click.isOn`。判定结果同时驱动 3D 标签高亮、2D 平面填充色与点击方向。
+
+#### 家具项目（kind: `catalog`）
+
+- **新建**：启动页「新建项目」先选类型（设备 / 背景 / 家具包）再填名称；`kind` 由服务端记在 `project.json`，`PUT` 时与磁盘比对，改了就 409 拒回（`POST /api/projects` 传 `kind`）。
+- **清单**：`project.catalog.items[]`，一条对应一个 GLB —— `{ id, name, type, w, d, h, color, model }`。导入模型时前端用 `GLTFLoader` 实测包围盒自动填 `w/d/h`（宽 = X、深 = Z、高 = Y），也可在右侧点「按模型实测」重算。
+- **分类**：`type` 必须命中 ha-3d-home 的分类枚举。编辑页的下拉来自 `GET /api/catalog-types`：studio 服务端优先向 home 的 `/api/catalog` 取（`types` 是唯一出处），home 不可达才用本地兜底表。
+- **产物**：家具包 = `item.json`（`kind:"catalog"` + `id`(=项目 id) + `items` 数组）+ 各条目引用的 `.glb` **平铺**在包根。
+  - 导出：页面「导出家具包」/ `GET /api/projects/:id/export-catalog`
+  - 发布：页面「发布到 ha-3d-home」/ `POST /api/projects/:id/publish-catalog`（同一个远程安装接口，home 按包内 `kind` 分流到 `custom/models/<项目id>/`，包内 `id` 必须与 `?id` 一致）
+  - 插件端点（`/export`、`/publish`）遇到 `catalog` 项目会直接 400 并指路，不会打出半套插件包
+- **home 侧条目 id**：`<项目id>:<条目id>`，所以不同家具包用同名条目（都叫 `sofa`）也不会互相覆盖。
 
 ### 6. 离线打包与在线安装
 
@@ -181,7 +193,9 @@ npm run pack:image:arm64     # 给 ARM 服务器 / NAS 打包
 ```
 server/            Node 服务端（Express, 端口 8098）
   index.js         入口：静态托管 client/dist + API + WS + MCP(SSE)
-  routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布）
+  routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布 / 家具包）
+  catalog-schema.js 家具项目的数据形状 + 校验 + item.json 清单构建（纯函数）
+  catalog-pkg.js   家具包打包 + 远程发布（item.json + 多个平铺 glb）
   mcp/             30 个 MCP 工具定义（按域拆分：config/preview/projects/models/publish/lock + helpers）
   mcp-tools.js     MCP 工具装配薄壳（把上面各域 register 进 server）
   mcp-sse.js       MCP SSE 传输
@@ -190,7 +204,7 @@ server/            Node 服务端（Express, 端口 8098）
   generator.js     manifest 拼装与配置校验（代码一律取 customJs）
   config.js        路径 / 项目读写 / 远程目标配置
 client/src/        前端（Vue3 + Vite）
-  components/      PluginStage（3D 预览）/ RightPanel / LeftRail / Home
+  components/      PluginStage（3D 预览）/ RightPanel / LeftRail / Home / CatalogEditor（家具编辑页）
   engine/          plugin-engine（插件装载与运行）/ plugin-preview / three-host
 data/
   projects/<id>/   每个插件项目：project.json + models/*.glb + preview.png

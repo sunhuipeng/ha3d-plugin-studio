@@ -1,7 +1,9 @@
 <script setup>
 /* 面板：插件设置（plugin id/名称/kind/type/版本/锚点 z/说明/图标 + 发布目标）
- * 插件只有两类：kind:'device'（设备 **含门/窗**）与 kind:'background'。
- * 门/窗 = type:'door'/'window' 的贴墙设备，不再是独立 kind。 */
+ * 这里只服务插件项目：kind:'device'（设备 **含门/窗**）与 kind:'background'。
+ * 门/窗 = type:'door'/'window' 的贴墙设备，不再是独立 kind；
+ * 家具项目（kind:'catalog'）走独立的家具编辑页（components/CatalogEditor.vue）。
+ * kind 在新建项目时确定，本面板只读展示。 */
 import { computed } from 'vue';
 import { S, scheduleSave, MODEL_TYPES, isWallType } from '../../store';
 
@@ -14,13 +16,7 @@ const typeOptions = computed(() => {
 /* 当前 type 是否门/窗（决定要不要显示「设备实体绑定」那一行） */
 const wallType = computed(() => isWallType(S.proj?.plugin.type));
 
-function onKindChange() {
-  const p = S.proj.plugin;
-  if (p.kind === 'device' && !MODEL_TYPES.includes(p.type)) p.type = 'switch';
-  /* 背景类没有实体类型：输入框隐藏的同时把 type 固定成 'bg'（下游按这个值识别） */
-  if (p.kind === 'background') p.type = 'bg';
-  scheduleSave();
-}
+/* kind 只读：项目类型在新建时选定（见启动页「新建项目」），服务端 PUT 也会拒绝变更 */
 
 /* 图标属于首个样式（插件默认造型） */
 const icon2 = computed({
@@ -52,9 +48,11 @@ const LOCK = computed(() => S.lock.locked);
     </label>
     <div class="grid2">
       <label>kind
-        <el-select :disabled="LOCK" clearable v-model="S.proj.plugin.kind" style="width: 100%" @change="onKindChange">
+        <!-- 项目类型在新建时确定（服务端 PUT 也会拒改），这里只读展示 -->
+        <el-select :model-value="S.proj.plugin.kind" disabled style="width: 100%">
           <el-option label="device 设备（含门/窗）" value="device" />
           <el-option label="background 背景" value="background" />
+          <el-option label="catalog 家具包" value="catalog" />
         </el-select>
       </label>
       <label v-if="S.proj.plugin.kind !== 'background'">type
