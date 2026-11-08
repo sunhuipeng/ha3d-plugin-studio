@@ -79,7 +79,13 @@ function normIncomingStyles(list) {
     ['icon', 'desc'].forEach((k) => { if (typeof s[k] === 'string' && s[k]) out[k] = s[k]; });
     if (typeof s.z === 'number' && Number.isFinite(s.z)) out.z = s.z;
     if (typeof s.labelOffset === 'number' && Number.isFinite(s.labelOffset)) out.labelOffset = s.labelOffset;
-    if (typeof s.refresh === 'boolean') out.refresh = s.refresh;
+    /* 背景动态刷新率是 Hz 数字（引擎 refreshOf 按 Number 读，钳 0~30）。
+     * 早期曾有把 refresh 当布尔开关的旧项目，这里兼容成 1 / 0，不再把数字丢掉。 */
+    if (typeof s.refresh === 'number' && Number.isFinite(s.refresh)) {
+      out.refresh = Math.max(0, Math.min(30, Math.round(s.refresh)));
+    } else if (typeof s.refresh === 'boolean') {
+      out.refresh = s.refresh ? 1 : 0;
+    }
     out.options = (Array.isArray(s.options) ? s.options : []).filter((o) => o && o.key).map((o) => {
       const type = normalizeOptionType(o.type);
       const opt = { key: String(o.key), label: o.label ? String(o.label) : String(o.key), type };
@@ -103,6 +109,20 @@ function normIncomingFields(list) {
     const domains = splitList(f.domains);
     if (domains.length) out.domains = domains;
     if (valueType === 'enum') out.enumValues = normalizeEnumValues(f.enumValues);
+    /* 字段属性（实体 attributes 的 YAML 示例）：一律存成字符串。
+       传对象也收 —— JSON 是 YAML 1.2 的子集，前端 yaml 解析器照样能读，
+       这样 AI 用 JSON 随手写一遍也不会把字段变成对象。 */
+    if (f.attributes !== undefined && f.attributes !== null) {
+      const raw = typeof f.attributes === 'string'
+        ? f.attributes
+        : JSON.stringify(f.attributes, null, 2);
+      const attrs = String(raw)
+        .replace(/\r\n?/g, '\n')
+        .replace(/[ \t]+$/gm, '')
+        .replace(/^\n+/, '')
+        .replace(/\n+$/, '');
+      if (attrs) out.attributes = attrs;
+    }
     if (f.def !== undefined) out.def = f.def;
     return out;
   });
@@ -123,7 +143,7 @@ function register(server) {
   /* 项目配置全貌（不含代码）：开工前用它建上下文 */
   server.tool(
     'studio_get_project',
-    '一站式读取项目全部配置（不含代码）：AI 提示词 aiPrompt、插件属性（settings）、样式与参数（styles）、字段绑定（fields）、可用模型（models）。开发插件的第一步永远是调它建立上下文，再 studio_get_code 读代码',
+    '一站式读取项目全部配置（不含代码）：AI 提示词 aiPrompt、插件属性（settings）、样式与参数（styles）、字段绑定（fields）、可用模型（models）；家具包（kind: catalog）会额外返回 catalog（整张家具清单 + 包元信息）。开发插件的第一步永远是调它建立上下文，再 studio_get_code 读代码',
     { projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目') },
     async ({ projectId }) => {
       try {
@@ -137,11 +157,11 @@ function register(server) {
 
   server.tool(
     'studio_get_code',
-    '读取当前项目的完整插件代码（plugin.js 全文）——造型、部件、实体绑定、状态逻辑都在里面，改代码从这里开始。附带模型文件列表与最小项目概要',
+    '读取当前项目的完整插件代码（plugin.js 全文）——造型、部件、实体绑定、状态逻辑都在里面，改代码从这里开始。附带模型文件列表与最小项目概要。家具包（kind: catalog）没有插件代码，请用 studio_list_catalog_items',
     { projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目') },
     async ({ projectId }) => {
       try {
-        const pid = H.requirePid(projectId);
+        const pid = H.assertPluginProject(projectId);
         const proj = readProject(pid);
         const built = buildAll(proj);
         return H.text({
@@ -179,7 +199,7 @@ function register(server) {
     },
     async ({ projectId, code, view, run }) => {
       try {
-        const pid = H.requirePid(projectId);
+        const pid = H.assertPluginProject(projectId);
         const proj = readProject(pid);
         const src = String(code == null ? '' : code);
 
@@ -233,7 +253,7 @@ function register(server) {
         icon: z.string().optional().describe('SVG 图标字符串（左下角卡片用）'),
         z: z.number().optional().describe('平面图叠放层级（2D 俯视）'),
         labelOffset: z.number().optional().describe('状态标签相对模型高度（米）'),
-        refresh: z.boolean().optional(),
+        refresh: z.number().optional().describe('刷新率（Hz，0 = 静态只画一次；背景插件动态效果用，引擎钳制 1~30）'),
         options: z.array(z.object({
           key: z.string(),
           label: z.string().optional(),
@@ -252,6 +272,8 @@ function register(server) {
         label: z.string().optional(),
         valueType: z.enum(['number', 'text', 'enum']).optional().describe('值类型，缺省 text'),
         enumValues: z.any().optional().describe('enum 的取值列表'),
+        attributes: z.any().optional()
+          .describe('实体 attributes 的 YAML 示例（给人 / AI 读，预览时作为模拟实体初值），如 "temperature: 26\\nhvac_action: heating"；也接受对象'),
         domains: z.any().optional().describe('可选值范围提示（数值/字符串列表）'),
         placeholder: z.string().optional(),
         tip: z.string().optional(),
@@ -261,7 +283,7 @@ function register(server) {
     },
     async ({ projectId, styles, fields }) => {
       try {
-        const pid = H.requirePid(projectId);
+        const pid = H.assertPluginProject(projectId);
         if (!Array.isArray(styles) && !Array.isArray(fields)) {
           return H.fail('请至少传 styles 或 fields（最终版全量清单）');
         }

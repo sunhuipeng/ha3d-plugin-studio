@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { frameObject } from './engine/frame';
+import { applyLegacyRenderer } from './engine/three-legacy';
 
 const cache = new Map();   // key: projId/file → dataURL | 'error' | undefined(加载中)
 const revs = new Map();    // key: projId/file → 版本号（材质修复后 +1，强制绕过浏览器缓存）
@@ -65,6 +66,7 @@ export function bumpModel(projId, file) {
 function getRenderer(size = 96) {
   if (!renderer) {
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    applyLegacyRenderer(renderer);   // 缩略图与主视口同口径（见 engine/three-legacy.js）
     renderer.setPixelRatio(2);   // 2x 位图：高分屏下灯箱放大不糊
   }
   renderer.setSize(size, size, false);
@@ -100,8 +102,9 @@ export function modelThumbUrl(projId, file) {
 /* 通用单对象缩略图渲染（居中取景 + 打光） */
 function renderThumb(obj) {
   const scene = new THREE.Scene();
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4b2, 1.2));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  /* 渲染器已是 legacy 灯光口径（×PI），这里按物理光原值 ÷PI 换算，观感不变 */
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4b2, 0.38));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.25);
   dir.position.set(2, 4, 3);
   scene.add(dir);
   scene.add(obj);

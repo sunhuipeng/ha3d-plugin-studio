@@ -129,10 +129,15 @@ const LOCK = computed(() => S.lock.locked);
           <div v-else-if="expandedFiles.has(f) && isNodesError(f)" class="p-nodes p-node-err">⚠ 节点解析失败</div>
         </li>
       </ul>
-      <div v-if="!S.models.length" class="hint">模型文件库为空，点下方按钮导入 GLB。</div>
+      <div v-if="!S.models.length" class="hint">模型文件库为空。保持为空也没问题——纯代码建模即可；需要更精致的造型时，再用下方按钮导入 GLB。</div>
     </div>
 
-    <!-- 固定在面板最底部：导入入口始终可见，不随模型列表滚动 -->
+    <!-- 固定在面板最底部：说明 + 导入入口始终可见，不随模型列表滚动 -->
+    <div class="glb-note">
+      <b>导入 GLB 是可选项</b>：插件可以完全用代码绘制模型（比如用 <code>ctx.box</code> 拼体块），
+      一个文件都不上传也能出完整效果；用建模软件做好的 GLB，细节和材质通常更精致。
+      推荐按需选择——简单体块交给代码，精细造型上传模型，两者可以混用。
+    </div>
     <el-button :disabled="LOCK" type="primary" plain class="import-btn lock-block" @click="glbInput && glbInput.click()">＋ 导入 GLB 文件</el-button>
     <input ref="glbInput" type="file" accept=".glb" multiple hidden @change="onGlbFiles">
   </section>

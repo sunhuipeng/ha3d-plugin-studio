@@ -11,7 +11,8 @@ const {
   listProjectSummaries,
 } = require('./config');
 const { buildAll, validate } = require('./generator');
-const { newCatalogProject, normalizeCatalog, FALLBACK_TYPES, TYPE_LABELS } = require('./catalog-schema');
+const { newCatalogProject, normalizeCatalog } = require('./catalog-schema');
+const { resolveCatalogTypes } = require('./catalog-types');
 const { prepareCatalogExport, publishCatalog } = require('./catalog-pkg');
 const JSZip = require('jszip');
 const { prepareExportZip, buildProjectZip } = require('./plugin-pkg');
@@ -209,24 +210,8 @@ api.get('/home/house', async (req, res) => {
 /* 家具分类枚举：优先取 ha-3d-home 的 GET /api/catalog（它的 types 是唯一出处），
  * home 不可达时回落本机兜底表 —— 保证家具编辑页的分类下拉永远可用，且能跟 home 对齐。 */
 api.get('/catalog-types', async (req, res) => {
-  const remote = remoteTarget();
-  const norm = (list) => list.map((t) => {
-    if (t && typeof t === 'object') return { type: String(t.type || ''), name: String(t.name || t.type || '') };
-    return { type: String(t || ''), name: String(t || '') };
-  }).filter((t) => t.type);
-
-  if (remote.host) {
-    try {
-      const r = await fetch(remote.host.replace(/\/+$/, '') + '/api/catalog', { signal: AbortSignal.timeout(4000) });
-      const d = await r.json().catch(() => ({}));
-      const list = norm(Array.isArray(d.types) ? d.types : []);
-      if (r.ok && list.length) return res.json({ ok: true, source: 'home', host: remote.host, types: list });
-    } catch (e) { /* home 没起来就用兜底 */ }
-  }
-  res.json({
-    ok: true, source: 'fallback', host: remote.host || '',
-    types: FALLBACK_TYPES.map((t) => ({ type: t, name: TYPE_LABELS[t] || t })),
-  });
+  const r = await resolveCatalogTypes();
+  res.json({ ok: true, source: r.source, host: r.host, types: r.types, ...(r.error ? { warn: r.error } : {}) });
 });
 
 /* ---- 项目预览图（启动页卡片用） ----

@@ -19,6 +19,8 @@ const DOMAIN_DEFAULTS = {
   camera: { state: 'idle', attributes: { friendly_name: '预览摄像头' } },
   binary_sensor: { state: 'off', attributes: { friendly_name: '预览门磁', device_class: 'door' } },
   sensor: { state: '0', attributes: { friendly_name: '预览传感器', unit_of_measurement: '' } },
+  /* 背景插件 onData 常用：天气实体给一个可直接用于「晴 / 雨」判定的初始状态 */
+  weather: { state: 'sunny', attributes: { friendly_name: '预览天气', temperature: 22, humidity: 50 } },
   number: { state: '0', attributes: { friendly_name: '预览数值' } },
   select: { state: 'auto', attributes: { friendly_name: '预览选择' } },
   lock: { state: 'locked', attributes: { friendly_name: '预览门锁' } },

@@ -290,7 +290,8 @@ function castChoice(o, v) {
 }
 const shownEntities = computed(() => {
   const list = entities.value || [];
-  return isWall.value ? list.filter((e) => e.role !== 'main') : list;
+  /* 门窗的 entityId 只是门磁别名；背景没有「主实体」概念，只显示 fields 绑定的实体 */
+  return (isWall.value || isBg.value) ? list.filter((e) => e.role !== 'main') : list;
 });
 
 /* 插件自己算出来的状态文案（门插件：已关闭 / 开 50% / 已打开） */
@@ -380,6 +381,14 @@ function syncStatus() {
   S.previewStatus = preview.describe();
 }
 
+/* 天气实体：背景插件 onData 的常用数据源，给一组可循环切换的 condition */
+const WEATHER_SEQ = ['sunny', 'partlycloudy', 'cloudy', 'rainy', 'pouring', 'snowy', 'fog'];
+const WEATHER_TEXT = {
+  sunny: '晴', 'clear-night': '晴夜', partlycloudy: '少云', cloudy: '多云',
+  rainy: '雨', pouring: '暴雨', 'lightning-rainy': '雷雨', snowy: '雪',
+  fog: '雾', windy: '风', hail: '冰雹',
+};
+
 /* 实体开关：按域给一个「另一半」状态（设备类用） */
 function nextState(e) {
   const s = String(e.state || '');
@@ -395,6 +404,7 @@ function nextState(e) {
 /* 字段语义：按 key 判断是百分比（开门比例）还是开关量（门磁） */
 const RATIO_KEY = /ratio|position|percent|pct|progress|angle/i;
 function entKind(e) {
+  if (e.domain === 'weather') return 'weather';
   if (e.role === 'main') return 'main';
   const k = String(e.fieldKey || '');
   if (RATIO_KEY.test(k)) return 'ratio';
@@ -408,6 +418,7 @@ function isOnText(s) {
 /* 给人看的显示值：门磁 → 开/关，比例 → 百分比 */
 function entText(e) {
   const s = String(e.state == null ? '' : e.state);
+  if (e.domain === 'weather') return WEATHER_TEXT[s] || s || '—';
   if (entKind(e) === 'ratio') {
     const n = parseFloat(s);
     return isNaN(n) ? (s || '—') : Math.round(n) + '%';
@@ -427,6 +438,10 @@ function toggleEntity(e) {
       const n = parseFloat(e.state);
       const cur = isNaN(n) ? 0 : n;
       next = cur < 50 ? '50' : cur < 100 ? '100' : '0';
+    } else if (kind === 'weather') {
+      /* 晴 → 少云 → 多云 → 雨 → … 循环，点一下就能验证背景 onData 的分支 */
+      const i = WEATHER_SEQ.indexOf(String(e.state || ''));
+      next = WEATHER_SEQ[(i + 1 + WEATHER_SEQ.length) % WEATHER_SEQ.length];
     } else if (kind === 'binary') {
       next = isOnText(String(e.state || '')) ? 'off' : 'on';
     } else {
@@ -615,7 +630,7 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
       </div>
     </div>
 
-    <!-- 左下角卡片栈（从上到下）：样式(设备) → 样式参数(有 options 的都在) → 背景参数/预览状态。
+    <!-- 左下角卡片栈（从上到下）：样式(设备/背景) → 样式参数 → 实体(所有插件) → 背景参数(仅背景)。
          配置锁只锁左侧 tab 浮层，中间编辑区（含这些卡片）照常可用 -->
     <div class="pv-bottomleft">
     <!-- 样式元信息：设备类（离地高度 / 标签高度）+ 背景类（刷新率 refresh），存 styles 上 -->
@@ -692,7 +707,34 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
       </div>
     </div>
 
-    <!-- 安全范围（引擎画半透明占位长方体） -->
+    <!-- 实体卡片（所有插件都有，与样式 / 参数卡片分开）：
+         · 设备类：默认实体（主实体）+ 字段绑定的实体
+         · 门窗：没有主实体，只有字段（门磁 / 开门比例）
+         · 背景：没有主实体，只有 fields 字段（点击切状态 → 顶层 onData(fields, api)） -->
+    <div v-if="shownEntities.length || effectText" class="pv-entities">
+      <div class="pv-ent-head">
+        实体<span class="pv-ent-cur">{{ isBg ? '字段联动' : '默认实体 + 字段' }}</span>
+      </div>
+
+      <div v-for="e in shownEntities" :key="e.entityId" class="pv-ent"
+        :title="e.entityId + (e.fieldTip ? '｜' + e.fieldTip : '') + '（点击切换）'">
+        <span class="pv-ent-dot" :class="{ on: entKind(e) === 'ratio' ? parseFloat(e.state) > 0 : isOnText(String(e.state || '')) }"></span>
+        <span class="pv-ent-name">{{ e.role === 'main' ? '默认实体' : (e.label || e.name) }}</span>
+        <button class="pv-ent-val" @click="toggleEntity(e)">{{ entText(e) }}</button>
+      </div>
+
+      <template v-if="effectText">
+        <div v-if="shownEntities.length" class="pv-ent-sep"></div>
+        <div class="pv-ent pv-ent-effect">
+          <span class="pv-ent-name">效果</span>
+          <span class="pv-ent-effect-val">{{ effectText }}</span>
+        </div>
+      </template>
+
+      <div class="pv-ent-tip">点击右侧的值可切换：设备走 update()，背景走顶层 onData(fields, api)</div>
+    </div>
+
+    <!-- 安全范围（引擎画半透明占位长方体）——只有背景插件有「背景参数」这张卡 -->
     <div v-if="isBg" class="pv-entities">
       <div class="pv-ent-head">背景参数<span class="pv-ent-cur">{{ curStyleName }}</span></div>
       <div class="pv-ent pv-ent-safe" title="安全范围（米）——引擎按此尺寸绘制半透明房屋占位长方体，范围内 safe 判定为不允许">
@@ -707,26 +749,6 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
         </span>
       </div>
       <div class="pv-ent-tip">输入或滚轮实时预览占位范围；鼠标离开输入框后重绘背景并存入项目</div>
-    </div>
-    <div v-else-if="shownEntities.length || effectText" class="pv-entities">
-      <div class="pv-ent-head">预览状态<span class="pv-ent-cur">{{ curStyleName }}</span></div>
-
-      <div v-for="e in shownEntities" :key="e.entityId" class="pv-ent"
-        :title="e.entityId + (e.fieldTip ? '｜' + e.fieldTip : '') + '（点击切换）'">
-        <span class="pv-ent-dot" :class="{ on: entKind(e) === 'ratio' ? parseFloat(e.state) > 0 : isOnText(String(e.state || '')) }"></span>
-        <span class="pv-ent-name">{{ e.label || e.name }}</span>
-        <button class="pv-ent-val" @click="toggleEntity(e)">{{ entText(e) }}</button>
-      </div>
-
-      <template v-if="effectText">
-        <div v-if="shownEntities.length" class="pv-ent-sep"></div>
-        <div class="pv-ent pv-ent-effect">
-          <span class="pv-ent-name">效果</span>
-          <span class="pv-ent-effect-val">{{ effectText }}</span>
-        </div>
-      </template>
-
-      <div class="pv-ent-tip">点击右侧的值可切换，画面会实时响应</div>
     </div>
     </div>
 

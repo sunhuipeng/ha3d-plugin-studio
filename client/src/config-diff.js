@@ -8,9 +8,10 @@
  */
 import { normalizeOptionType, optionOwns } from './option-schema';
 import { normalizeFieldType, normalizeEnumValues } from './field-schema';
+import { normalizeAttrsYaml } from './attrs-yaml';
 
 const OPTION_KEYS = ['label', 'type', 'def', 'min', 'max', 'step', 'choices'];
-const FIELD_KEYS = ['label', 'domains', 'placeholder', 'tip', 'entityId', 'valueType', 'enumValues'];
+const FIELD_KEYS = ['label', 'domains', 'placeholder', 'tip', 'entityId', 'valueType', 'enumValues', 'attributes'];
 
 /* z / labelOffset 只有设备类插件（含门/窗）的样式才有；背景插件没有离地与标签的概念，
  * 其他类型忽略这两个字段的对比 —— 存档里残留的 z=0 之类不再报假差异。
@@ -68,6 +69,8 @@ function fieldsNorm(list) {
       valueType,
       /* 非枚举类不比较枚举值（面板里会把它们当无用残留） */
       enumValues: valueType === 'enum' ? normalizeEnumValues(f.enumValues).sort() : [],
+      /* 字段属性是 YAML 原文：只按归一化后的文本比（换行 / 行尾空格不算改动） */
+      attributes: normalizeAttrsYaml(f.attributes),
     };
   });
 }

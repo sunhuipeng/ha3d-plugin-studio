@@ -16,7 +16,8 @@
     "codemirror": "^6.0.2",
     "element-plus": "^2.14.7",
     "three": "^0.160.0",
-    "vue": "^3.4.0"
+    "vue": "^3.4.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",

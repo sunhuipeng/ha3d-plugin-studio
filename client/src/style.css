@@ -236,6 +236,22 @@ body {
   padding-left: 2px;
 }
 .ov-note.ph { color: #a3abb8; }
+/* 字段属性（YAML）：原样多行展示，点一下整段复制给 AI */
+.ov-yaml {
+  margin: 2px 0 0;
+  padding: 5px 7px;
+  background: #f6f8fb;
+  border-left: 2px solid #d5dfee;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: #55617a;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+}
+.ov-yaml:hover { background: #eef4fd; border-left-color: #8db4ea; }
 .ov-empty { font-size: 10.5px; color: #a8b0bd; line-height: 18px; }
 .ov-empty.sm { padding-left: 2px; }
 
@@ -275,6 +291,13 @@ textarea:not([class]) {
   padding: 0 10px 0 14px;   /* 右侧留 10px 呼吸感：贴边但不顶死（空白来自 split-button 外壳的老问题已修） */
   background: var(--bg2);
   border-bottom: 1px solid var(--line);
+}
+
+/* 两类编辑页顶栏共用的 MCP 接入说明徽标（绿色 = 能力标识，与数据徽标区分） */
+.mcp-badge {
+  font-size: 11px; color: #1a8a5a; background: rgba(26,138,90,.09);
+  border: 1px solid rgba(26,138,90,.28); border-radius: 999px;
+  padding: 2px 10px; white-space: nowrap; cursor: help; flex: 0 0 auto;
 }
 
 /* 顶栏右侧操作区：已保存 → 快照徽标 → 发布（整组贴右，内部 8px 间距） */
@@ -626,6 +649,19 @@ textarea:not([class]) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* 字段属性（YAML）：等宽字体 + 解析状态行（空 / 可解析 / 报错） */
+.ed-row .fld-line .yaml-input .el-textarea__inner {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 6px 8px;
+  tab-size: 2;
+}
+.yaml-state { font-size: 11px; line-height: 1.4; }
+.yaml-state.empty { color: #98a2b3; }
+.yaml-state.ok { color: #2f8f5b; }
+.yaml-state.bad { color: #d14343; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 /* select 参数的选项编辑器（一行一个 value/label） */
 .opt-choices {
   display: flex;
@@ -761,6 +797,28 @@ textarea:not([class]) {
 .import-btn {
   flex: none;               /* 固定在面板底部，不随模型列表滚动 */
   margin-top: 8px;
+}
+
+/* 部件面板底部说明：GLB 是可选项，纯代码建模也能出完整插件 */
+.parts-page .glb-note {
+  flex: none;
+  margin-top: 8px;
+  padding: 7px 9px;
+  background: #f6f8fb;
+  border-left: 2px solid #d5dfee;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #7d8798;
+}
+.parts-page .glb-note b { color: #55617a; }
+.parts-page .glb-note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: #2f6bbf;
+  background: #eef2f8;
+  padding: 0 3px;
+  border-radius: 3px;
 }
 
 .parts-ul li {
@@ -1045,7 +1103,7 @@ textarea:not([class]) {
 
 /* ============ 插件预览渲染区 ============ */
 .pv-stage {
-  background: #eef1f5;
+  background: #fafbfd;   /* 与 home display.html 的 #stage 同色 */
   user-select: none;
 }
 .pv-mount {
@@ -1197,8 +1255,10 @@ textarea:not([class]) {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  max-height: 60%;
-  overflow: hidden;
+  max-height: 78%;              /* 卡片栈：样式 → 样式参数 → 实体 → 背景参数，最多四张 */
+  overflow-x: hidden;
+  overflow-y: auto;             /* 四张卡在小窗口里放不下时滚动，不再裁掉最后一张 */
+  scrollbar-width: thin;
 }
 .pv-bottomleft > * { flex: 0 1 auto; min-height: 0; }
 .pv-entities {

@@ -8,6 +8,16 @@ const { normalizeOptionType } = require('../option-schema');
 const hub = require('../ws-hub');
 const H = require('./helpers');
 
+/* 插件引擎专属动作（样式 / 参数 / 实体 / 点击 / 运行期）在家具页没有对应实现，
+ * 落到家具页只会白等中继超时，提前按项目类型挡掉。
+ * view / screenshot / reload 是公共能力：两页共用同一个 ThreeHost 的相机与截图实现，
+ * 只是前端注册了不同形状的预览门面（见 ws-client.js 的 ensureViewportStage）。 */
+const COMMON_RELAY = new Set(['reload', 'view', 'screenshot']);
+async function relay(pid, name, args, timeout) {
+  if (!COMMON_RELAY.has(name)) H.assertPluginProject(pid);
+  return hub.call(pid, name, args, timeout);
+}
+
 function register(server) {
   server.tool(
     'studio_set_style',
@@ -23,7 +33,7 @@ function register(server) {
         if (!(p.styles || []).some((s) => s && s.id === styleId)) {
           throw new Error('样式不存在: ' + styleId + '（可用 studio_get_project 查）');
         }
-        return H.text(await hub.call(pid, 'set_style', { styleId }, 60000));
+        return H.text(await relay(pid, 'set_style', { styleId }, 60000));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -65,7 +75,7 @@ function register(server) {
           const all = [...new Set(styles.flatMap((s) => (s.options || []).map((o) => o && o.key)).filter(Boolean))];
           throw new Error(`参数不存在: ${key}（项目里可用的参数：${all.join(', ') || '无'}）`);
         }
-        return H.text(await hub.call(pid, 'set_option', { styleId: pick ? pick.id : undefined, key, value }, 60000));
+        return H.text(await relay(pid, 'set_option', { styleId: pick ? pick.id : undefined, key, value }, 60000));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -77,7 +87,7 @@ function register(server) {
     async ({ projectId }) => {
       try {
         const pid = H.requirePid(projectId);
-        return H.text(await hub.call(pid, 'click', {}, 30000));
+        return H.text(await relay(pid, 'click', {}, 30000));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -89,7 +99,7 @@ function register(server) {
     async ({ projectId }) => {
       try {
         const pid = H.requirePid(projectId);
-        return H.text(await hub.call(pid, 'label', {}, 30000));
+        return H.text(await relay(pid, 'label', {}, 30000));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -101,16 +111,18 @@ function register(server) {
     async ({ projectId }) => {
       try {
         const pid = H.requirePid(projectId);
-        return H.text(await hub.call(pid, 'reload', {}, 15000));
+        return H.text(await relay(pid, 'reload', {}, 15000));
       } catch (e) { return H.fail(e.message); }
     },
   );
 
   server.tool(
     'studio_view',
-    '只调整观看方式、不出图：转模型 / 移模型 / 归位，或转相机 / 平移 / 缩放。排查问题时先用它把姿态摆到看得清的位置，再调 studio_screenshot 按角度拍',
+    '只调整观看方式、不出图（插件页 / 家具页通用，共用 ThreeHost 的相机实现）：转模型 / 移模型 / 归位，或转相机 / 平移 / 缩放。'
+    + '家具页可传 itemId 先选中左侧清单里的某件家具（等价点击清单项，会等 GLB 加载完）。排查问题时先用它把姿态摆到看得清的位置，再调 studio_screenshot 按角度拍',
     {
       projectId: z.string().optional(),
+      itemId: z.string().optional().describe('家具页专用：先选中这件家具再摆姿态（等价于点击左侧清单；条目 id 见 studio_list_catalog_items）'),
       /* 模型整体姿态（排查时最常用） */
       modelRotate: z.array(z.number()).length(3).optional().describe('模型整体旋转 [rx,ry,rz]（度，累加）'),
       modelMove: z.array(z.number()).length(3).optional().describe('模型整体位移 [x,y,z]（米，累加）'),
@@ -136,16 +148,19 @@ function register(server) {
       try {
         const pid = H.requirePid(args.projectId);
         const { projectId, ...rest } = args;
-        return H.text(await hub.call(pid, 'view', rest, 30000));
+        return H.text(await relay(pid, 'view', rest, 30000));
       } catch (e) { return H.fail(e.message); }
     },
   );
 
   server.tool(
     'studio_screenshot',
-    '截图返回 PNG：默认截插件引擎的真实渲染结果。可指定视角预设、绝对机位、相对旋转/平移/缩放，也可以先把模型整体转一下再拍',
+    '截图返回 PNG（插件页 / 家具页通用，共用 ThreeHost 的离屏渲染）：截当前 3D 预览的真实渲染结果。'
+    + '可指定视角预设、绝对机位、相对旋转/平移/缩放，也可以先把模型整体转一下再拍；'
+    + '家具页可传 itemId 一步完成「选中清单某件 → 等模型加载 → 按指定机位截图」',
     {
       projectId: z.string().optional(),
+      itemId: z.string().optional().describe('家具页专用：先选中这件家具、等 GLB 加载完再拍（避免拍到切换瞬间的空场景）'),
       view: z.enum(H.SCREEN_VIEWS).optional().describe('视角预设：iso(四分之三) / front / back / left / right / top / low(低角) / detail(特写)'),
       azimuth: z.number().optional().describe('绝对方位角（度，0 = 从 +Z 看）'),
       elevation: z.number().optional().describe('绝对俯仰角（度，0 = 平视，90 = 正上方）'),
@@ -173,7 +188,7 @@ function register(server) {
       try {
         const pid = H.requirePid(args.projectId);
         const { projectId, ...rest } = args;
-        const r = await hub.call(pid, 'screenshot', rest, 60000);
+        const r = await relay(pid, 'screenshot', rest, 60000);
         const b64 = String(r?.dataUrl || '').replace(/^data:image\/png;base64,/, '');
         if (!b64) return H.fail('前端未返回截图');
         return {
@@ -200,7 +215,7 @@ function register(server) {
     async ({ projectId, entityId, state, attributes }) => {
       try {
         const pid = H.requirePid(projectId);
-        return H.text(await hub.call(pid, 'set_entity', { entityId, state, attributes }, 25000));
+        return H.text(await relay(pid, 'set_entity', { entityId, state, attributes }, 25000));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -220,7 +235,7 @@ function register(server) {
     async ({ projectId, view, refreshConfig }) => {
       try {
         const pid = H.requirePid(projectId);
-        const st = await hub.call(pid, 'render', { view, refreshConfig }, 90000);
+        const st = await relay(pid, 'render', { view, refreshConfig }, 90000);
         const r = st || {};
         return H.text({
           ok: r.ok !== false,
@@ -252,7 +267,7 @@ function register(server) {
     async ({ projectId, level, limit, clear }) => {
       try {
         const pid = H.requirePid(projectId);
-        const st = await hub.call(pid, 'runtime', { level, limit, clear }, 25000);
+        const st = await relay(pid, 'runtime', { level, limit, clear }, 25000);
         return H.text(st);
       } catch (e) {
         return H.fail(H.friendlyRelayError(e, '浏览器里的页面还是旧版本前端，请刷新编辑页后重试'));

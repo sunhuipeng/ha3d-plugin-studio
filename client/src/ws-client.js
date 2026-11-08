@@ -4,10 +4,11 @@
  *   { type:'tool', id, name, args }  → 本地执行 → { type:'tool_result', id, ok, result }
  * 服务端还可能发：
  *   { type:'refresh', what:'models' }                                → 局部刷新模型列表
+ *   { type:'refresh', what:'catalog' }                               → MCP 改了家具清单：重拉配置覆盖内存 + 重载预览
  *   { type:'mcp', event:'connected'|'activity'|'disconnected', tool? } → 顶部横条提示
  */
 import { watch } from 'vue';
-import { S, act, api, viewportApi, engineList, scheduleSave, applyLock, toast } from './store';
+import { S, act, api, viewportApi, engineList, scheduleSave, cancelPendingSave, applyLock, toast } from './store';
 import { bumpModel } from './thumb';
 import { readRuntimeLog, runtimeLogStats, clearRuntimeLog, setRuntimeProjectGetter } from './runtime-log';
 
@@ -22,6 +23,21 @@ let retry = 0;
 let retryTimer = null;
 /* 被 MCP「单窗口收敛」关掉后不再重连（否则服务端一断开，它又连回来） */
 let shuttingDown = false;
+/* 本页在服务端的 clientId（welcome 里给），用于识别「关闭指令是不是发给自己的」 */
+let myClientId = '';
+
+/* 页面（标签页）身份：**同一个页面里所有 socket 共用一个 pageId**。
+ * 为什么需要它：initWs() 在 App.vue 顶层调用，HMR 重新执行本模块时会再建一条 socket，
+ * 旧 socket 不关 → 服务端会看到「同一页面 = 多个连接」。单窗口收敛必须按页面去重，
+ * 否则会把同一页面的旧连接当多余页面，发一条关闭指令就让用户把页面关掉了。
+ * 挂在 window 上而不是模块变量：模块被 HMR 重新求值后仍复用同一个 id。 */
+const PAGE_ID = (() => {
+  if (typeof window === 'undefined') return 'page';
+  if (!window.__ha3dPageId) {
+    window.__ha3dPageId = 'pg' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+  return window.__ha3dPageId;
+})();
 
 function send(obj) {
   if (!ws || ws.readyState !== 1) return false;
@@ -31,6 +47,7 @@ function send(obj) {
 function hello() {
   send({
     type: 'hello',
+    pageId: PAGE_ID,
     projectId: S.proj?.id || '',
     projectName: S.proj?.name || '',
     visible: document.visibilityState === 'visible',
@@ -41,7 +58,12 @@ function hello() {
 
 /* 可见 / 聚焦状态上报：studio_single_window 靠它挑「用户正在看的那个标签页」 */
 function reportPresence() {
-  send({ type: 'presence', visible: document.visibilityState === 'visible', focused: document.hasFocus() });
+  send({
+    type: 'presence',
+    pageId: PAGE_ID,
+    visible: document.visibilityState === 'visible',
+    focused: document.hasFocus(),
+  });
 }
 
 /* 收到 close_extra：断开中继（不再接收指令）→ 尝试关页面 → 关不掉就盖一层说明 */
@@ -169,7 +191,7 @@ function onMcpEvent(msg) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ---------------- 插件渲染区：等待就绪 ---------------- */
+/* ---------------- 预览区：等待就绪 ---------------- */
 async function ensurePreviewStage(timeout = 8000) {
   const t0 = Date.now();
   while (!viewportApi.pluginPreview) {
@@ -178,6 +200,28 @@ async function ensurePreviewStage(timeout = 8000) {
     await sleep(60);
   }
   return viewportApi.pluginPreview;
+}
+
+/* 通用视图门面：插件页注册 pluginPreview、家具页注册 catalogPreview，
+ * 两者都基于同一个 ThreeHost，暴露同形状的相机 / 截图 / 模型姿态方法。
+ * view / screenshot 走这里，一条链路服务两类项目，不用各写一套中继。 */
+async function ensureViewportStage(timeout = 8000) {
+  const t0 = Date.now();
+  while (!viewportApi.pluginPreview && !viewportApi.catalogPreview) {
+    if (!S.proj) throw new Error('当前没有打开的项目');
+    if (Date.now() - t0 > timeout) throw new Error('3D 预览区初始化超时（可能 WebGL 不可用）');
+    await sleep(60);
+  }
+  return viewportApi.pluginPreview || viewportApi.catalogPreview;
+}
+
+/* 家具页专属：先点中清单某件家具并等 GLB 真正进场景，再摆姿态 / 截图，避免拍到空场景 */
+async function selectCatalogItem(pv, itemId) {
+  if (!itemId) return null;
+  if (typeof pv.selectItem !== 'function') {
+    throw new Error('itemId 只在家具包编辑页可用（插件项目请用 styleId / entityId）');
+  }
+  return pv.selectItem(itemId);
 }
 
 async function waitPreviewIdle(pv, timeout = 20000) {
@@ -245,7 +289,54 @@ function coerceOptionValue(opt, v) {
   return String(v);
 }
 
+/* 从服务器重拉家具清单并覆盖前端内存：what:'catalog' 广播与 MCP 的 studio_refresh_catalog
+ * 共用这一份实现，不复制第二套刷新逻辑。
+ * 顺序很重要：先取消挂着的防抖保存（否则旧内存 900ms 后写回磁盘会把服务端的改动冲掉），
+ * 再覆盖内存、清模型缓存、刷新模型列表，最后 +epoch 通知 CatalogEditor 重载 3D 预览。 */
+async function refreshCatalogFromServer(msg = {}) {
+  const pid = (S.proj && S.proj.id) || '';
+  const isCatalog = !!(pid && S.proj.plugin && S.proj.plugin.kind === 'catalog');
+  if (msg.bump) (Array.isArray(msg.files) ? msg.files : []).forEach((f) => bumpModel(pid, f));
+  let pulled = false;
+  let error = '';
+  if (isCatalog) {
+    try {
+      const fresh = await api('GET', `/api/projects/${pid}`);
+      if (fresh) {
+        S.proj.catalog = fresh.catalog || { items: [] };
+        if (fresh.plugin) {
+          ['version', 'description', 'name'].forEach((k) => {
+            if (fresh.plugin[k] !== undefined) S.proj.plugin[k] = fresh.plugin[k];
+          });
+        }
+        if (fresh.name) S.proj.name = fresh.name;
+        cancelPendingSave();
+        S.catalogEpoch += 1;
+        pulled = true;
+      }
+    } catch (e) { error = e.message || String(e); }
+  } else {
+    error = '当前页面不是家具包编辑页';
+  }
+  try { await act.loadModels(); } catch (e) { /* ignore */ }
+  const items = (S.proj && S.proj.catalog && S.proj.catalog.items) || [];
+  return {
+    ok: pulled, projectId: pid, pulled, error,
+    itemCount: items.length,
+    items: items.map((x) => ({ id: x.id, name: x.name || x.id, model: x.model || '' })),
+  };
+}
+
 const handlers = {
+  /* 家具页：从服务器重拉清单覆盖内存（与 what:'catalog' 广播共用上面的实现） */
+  catalog_refresh: async () => refreshCatalogFromServer({}),
+
+  /* 家具页：当前正在预览哪件（多轮对话先定位「要改的是哪个」，不摆姿态、不出图） */
+  catalog_current: async () => {
+    const pv = await ensureViewportStage();
+    if (typeof pv.selectItem !== 'function') throw new Error('当前打开的不是家具编辑页');
+    return pv.describe();
+  },
   /* 服务端已把代码落盘 → 清空上一轮渲染 → 按最新代码重建 */
   run_code: async ({ view } = {}) => {
     if (!S.proj) throw new Error('当前没有打开的项目');
@@ -358,21 +449,31 @@ const handlers = {
     };
   },
 
+  /* 家具页：点击左侧清单选中某件（与 view / screenshot 共用 selectItem 门面方法） */
+  catalog_select: async ({ itemId } = {}) => {
+    const pv = await ensureViewportStage();
+    if (!itemId) throw new Error('缺少 itemId（见 studio_list_catalog_items）');
+    return selectCatalogItem(pv, itemId);
+  },
+
   /* 只摆姿态不出图：转模型 / 移模型 / 归位 / 转相机，返回当前机位与模型姿态 */
   view: async (args = {}) => {
     const a = args || {};
-    const pv = await ensurePreviewStage();
+    const pv = await ensureViewportStage();
     await waitPreviewIdle(pv);
+    await selectCatalogItem(pv, a.itemId);
     const pose = applyPose(pv, a);
     const d = pv.describe();
-    return { camera: d.camera, model: pose.model || d.model, size: d.size, label: d.label };
+    return { camera: d.camera, model: pose.model || d.model || d.pose, size: d.size, label: d.label,
+      ...(d.itemId ? { itemId: d.itemId, items: d.items } : {}) };
   },
 
   /* 截图：可以先把机位、模型姿态摆好，再出图 */
   screenshot: async (args = {}) => {
     const a = args || {};
-    const pv = await ensurePreviewStage();
+    const pv = await ensureViewportStage();
     await waitPreviewIdle(pv);
+    await selectCatalogItem(pv, a.itemId);
     const pose = applyPose(pv, a);
 
     const shot = Object.assign({
@@ -602,18 +703,32 @@ async function onMessage(ev) {
     return;
   }
 
+  /* 服务端分配的连接 id：记下来，关闭指令里带的就是它 */
+  if (msg.type === 'welcome') {
+    myClientId = msg.clientId || '';
+    return;
+  }
+
   /* 单窗口收敛：服务端问「你现在可见/有焦点吗」→ 回 presence */
   if (msg.type === 'ask_presence') {
     reportPresence();
     return;
   }
-  /* 单窗口收敛：本页不是被保留的那个 → 断中继 + 关页面 */
+  /* 单窗口收敛：本页不是被保留的那个 → 断中继 + 关页面。
+   * 双保险：指令里若说明「保留的就是本页面」（keptPageId 相同 / kept 是自己），一律不关 ——
+   * 同一页面可能有多个 socket（HMR / 重连残留），旧 socket 收到指令不能把整个页面带走。 */
   if (msg.type === 'close_extra') {
+    if (msg.keptPageId && msg.keptPageId === PAGE_ID) return;
+    if (msg.kept && myClientId && msg.kept === myClientId) return;
     shutdownSelf();
     return;
   }
 
   if (msg.type === 'refresh') {
+    if (msg.what === 'catalog') {
+      await refreshCatalogFromServer(msg);
+      return;
+    }
     if (msg.what === 'models') {
       /* files + bump：文件内容被服务端改写（如 MCP 修复材质）→ 顶掉缩略图/节点缓存并让预览重载，绕开浏览器缓存 */
       if (msg.bump) {
@@ -655,15 +770,47 @@ function connect() {
   ws.onerror = () => { try { if (ws) ws.close(); } catch (e) { /* ignore */ } };
 }
 
-/* 在 App setup 中调用一次 */
+/* 在 App setup 中调用一次。
+ * ⚠ 一个页面**只能有一条 socket**：HMR 会重新执行本模块并再调一次 initWs，
+ * 不收拾旧连接就会在服务端留下多个「同一页面」的连接（单窗口收敛会被误判）。 */
 export function initWs() {
+  /* HMR / 重复调用：先把上一次的连接与监听全部拆掉 */
+  if (typeof window !== 'undefined' && typeof window.__ha3dWsTeardown === 'function') {
+    try { window.__ha3dWsTeardown(); } catch (e) { /* ignore */ }
+  }
+
   connect();
-  watch(() => S.proj?.id, () => hello());
-  watch(() => S.proj?.name, () => hello());
+  const stops = [
+    watch(() => S.proj?.id, () => hello()),
+    watch(() => S.proj?.name, () => hello()),
+  ];
   /* 切换标签页 / 窗口失焦 → 告诉服务端谁在前台（studio_single_window 用） */
-  if (typeof document !== 'undefined') {
+  const hasDom = typeof document !== 'undefined';
+  if (hasDom) {
     document.addEventListener('visibilitychange', reportPresence);
     window.addEventListener('focus', reportPresence);
     window.addEventListener('blur', reportPresence);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.__ha3dWsTeardown = () => {
+      stops.forEach((stop) => { try { stop(); } catch (e) { /* ignore */ } });
+      if (hasDom) {
+        document.removeEventListener('visibilitychange', reportPresence);
+        window.removeEventListener('focus', reportPresence);
+        window.removeEventListener('blur', reportPresence);
+      }
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      const sock = ws;
+      ws = null;
+      if (sock) {
+        sock.onopen = null;
+        sock.onmessage = null;
+        sock.onclose = null;
+        sock.onerror = null;
+        try { sock.close(); } catch (e) { /* ignore */ }
+      }
+    };
   }
 }

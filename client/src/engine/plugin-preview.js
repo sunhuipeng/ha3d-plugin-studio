@@ -7,6 +7,7 @@
 import { createPluginEngine } from './plugin-engine';
 import { createMockHa, guessEntityId } from './mock-ha';
 import { clamp } from './math';
+import { parseAttrsYaml } from '../attrs-yaml';
 
 /* 设备类型 → 默认主实体域（预览时随便给一个能跑通的实体） */
 const TYPE_DOMAIN = {
@@ -319,15 +320,19 @@ export class PluginPreview {
   _defineEntities(def, obj) {
     /* 主实体：门/窗可能没有（entityId 为空），空串别往状态表里塞 */
     if (obj.entityId) this.ha.define(obj.entityId);
-    /* 拓展实体 */
-    this.engine.fieldsOf(def).forEach((f) => {
-      const eid = obj[f.key];
-      if (eid) this.ha.define(eid);
+    /* 拓展实体：字段上写的 YAML 属性当模拟实体的初值（解析失败就当没写，
+       面板里已经就地报错；这里不能让预览因为一段说明性文本挂掉）。
+       项目配置的字段优先于代码声明：作者在面板里改的属性才是要看的那份。 */
+    const byKey = new Map();
+    this.engine.fieldsOf(def).forEach((f) => { if (f && f.key) byKey.set(f.key, f); });
+    ((this.project && this.project.fields) || []).forEach((f) => {
+      if (f && f.key) byKey.set(f.key, f);
     });
-    (this.project && this.project.fields || []).forEach((f) => {
-      if (!f || !f.key) return;
-      const eid = obj[f.key];
-      if (eid) this.ha.define(eid);
+    byKey.forEach((f, key) => {
+      const eid = obj[key];
+      if (!eid) return;
+      const parsed = parseAttrsYaml(f.attributes);
+      this.ha.define(eid, null, parsed.ok && !parsed.empty ? parsed.value : null);
     });
   }
 

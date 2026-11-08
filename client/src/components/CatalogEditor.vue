@@ -5,13 +5,14 @@
  * 家具项目没有代码 / 实体 / 样式参数，重点是「浏览 + 逐件描述」：
  *   左：家具清单（一个 GLB = 一条，导入即生成，可删）
  *   中：3D 预览（等轴 / 正视 / 俯视 + 网格，选中哪件看哪件）
- *   右：当前家具的属性（名称 / 分类 / 尺寸（可从模型实测）/ 兜底色 / 模型文件）
+ *   右：当前家具的属性（名称 / 分类 / 尺寸（模型实测，只读）/ 兜底色 / 模型文件）
+ *      尺寸不许手改：它是 GLB 的固有尺寸，实际大小在 ha-3d-home 里用「整体比例缩放」调。
  * 产物：导出或发布「家具包」= item.json（items 数组）+ 各条目引用的 glb 平铺。
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { S, act, scheduleSave, toast } from '../store';
+import { S, act, scheduleSave, toast, viewportApi } from '../store';
 import { prettyName } from '../catalog';
 import { ThreeHost } from '../engine/three-host';
 
@@ -37,26 +38,44 @@ function modelUrlOf(file) {
   return `/api/projects/${S.proj.id}/models/${encodeURIComponent(file)}`;
 }
 
+let loadPromise = null;
+let loadSeq = 0;
+let selecting = false;
+
+/* 加载选中件并返回 Promise：MCP 的「点清单 → 摆机位 → 截图」必须等 GLB 真的进场景，
+ * 否则会拍到 clearModel() 之后的空场景。loadSeq 防止连续切换时旧回调覆盖新模型。 */
 function loadSel() {
-  if (!host) return;
+  if (!host) return Promise.resolve(null);
+  const seq = ++loadSeq;
   loadErr.value = '';
   host.clearModel();
   const it = sel.value;
-  if (!it || !it.model) return;
+  if (!it || !it.model) return Promise.resolve(null);
   loading.value = true;
-  new GLTFLoader().load(modelUrlOf(it.model), (gltf) => {
-    loading.value = false;
-    host.setModel(gltf.scene);
-    host.applyView('iso');
-    /* 顺手给启动页卡片留一张快照（与插件编辑页同口径：preview.png） */
-    clearTimeout(snapTimer);
-    snapTimer = setTimeout(() => {
-      try {
-        const url = host.snapshot({ width: 960, height: 640, view: 'iso', background: 0xffffff });
-        if (url) act.savePreview(url).catch(() => {});
-      } catch (e) { /* 快照失败不影响编辑 */ }
-    }, 500);
-  }, undefined, () => { loading.value = false; loadErr.value = '模型加载失败（文件可能损坏或不在项目里）'; });
+  const p = new Promise((resolve) => {
+    new GLTFLoader().load(modelUrlOf(it.model), (gltf) => {
+      if (seq !== loadSeq) { resolve(null); return; }
+      loading.value = false;
+      host.setModel(gltf.scene);
+      host.applyView('iso');
+      /* 顺手给启动页卡片留一张快照（与插件编辑页同口径：preview.png） */
+      clearTimeout(snapTimer);
+      snapTimer = setTimeout(() => {
+        try {
+          const url = host.snapshot({ width: 960, height: 640, view: 'iso', background: 0xffffff });
+          if (url) act.savePreview(url).catch(() => {});
+        } catch (e) { /* 快照失败不影响编辑 */ }
+      }, 500);
+      resolve(describe());
+    }, undefined, () => {
+      if (seq !== loadSeq) { resolve(null); return; }
+      loading.value = false;
+      loadErr.value = '模型加载失败（文件可能损坏或不在项目里）';
+      resolve(null);
+    });
+  });
+  loadPromise = p;
+  return p;
 }
 
 function view(name) { if (host) host.applyView(name); }
@@ -66,19 +85,84 @@ function toggleGrid() {
   if (host) host.setGrid(grid.value);
 }
 
-watch(selId, () => loadSel());
+/* 视图状态回包，字段与插件页 preview.describe() 同口径（model = 模型姿态） */
+function describe() {
+  const box = host ? host.bounds() : null;
+  const it = sel.value;
+  return {
+    ok: !loadErr.value,
+    itemId: selId.value || '',
+    label: (it && (it.name || it.id)) || '',
+    name: (it && it.name) || '',
+    modelFile: (it && it.model) || '',
+    model: host ? host.modelState() : null,
+    size: box ? [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z]
+      .map((n) => Math.round(n * 1000) / 1000) : null,
+    camera: host ? host.cameraState() : null,
+    items: items.value.map((x) => ({ id: x.id, name: x.name || x.id, model: x.model || '' })),
+  };
+}
+
+/* 点击左侧清单：与页面上点条目等价，但会等模型加载完成（selecting 抑制 watch 重复加载） */
+async function selectItem(itemId) {
+  const id = String(itemId || '');
+  if (!items.value.some((x) => x && x.id === id)) {
+    throw new Error(`找不到家具「${id}」（可用 studio_list_catalog_items 查全部 ${items.value.length} 件）`);
+  }
+  selecting = true;
+  selId.value = id;
+  await nextTick();
+  selecting = false;
+  await loadSel();
+  return describe();
+}
+
+/* MCP 视图门面：与插件页 pluginPreview 同形状，底层就是同一个 ThreeHost。
+ * ws-client.js 的 ensureViewportStage 统一取用，view / screenshot 一条链路服务两类项目。 */
+const catalogPreview = {
+  kind: 'catalog',
+  selectItem,
+  listItems: () => items.value.map((x) => ({ id: x.id, name: x.name || x.id, model: x.model || '' })),
+  screenshot: (o) => host && host.snapshot(o || {}),
+  setCamera: (o) => host && host.setCamera(o || {}),
+  setView: (name) => { view(name); return host ? host.cameraState() : null; },
+  orbit: (a, e) => host && host.orbit(a, e),
+  pan: (dx, dy) => host && host.pan(dx, dy),
+  zoom: (f) => host && host.zoomBy(f),
+  transformModel: (o) => host && host.transformModel(o || {}),
+  describe,
+  loading: () => loading.value,
+};
+
+watch(selId, () => { if (!selecting) loadSel(); });
+
+/* MCP 通过 studio_set_catalog_item / studio_upload_catalog_model 改了清单：
+ * 服务端落盘后 ws 推 catalog 刷新，store 覆盖内存清单并 +catalogEpoch。
+ * 选中项若还在、但对象被整条替换，watch(selId) 不会触发，必须在这里手动重载 3D 预览；
+ * 选中项被删了就切到第一件（切换会触发 watch(selId)，不用重复 loadSel）。 */
+watch(() => S.catalogEpoch, () => {
+  const list = items.value;
+  if (!list.some((x) => x && x.id === selId.value)) {
+    selId.value = list.length ? list[0].id : '';
+  } else {
+    loadSel();
+  }
+});
 
 onMounted(async () => {
   await nextTick();
   host = new ThreeHost(hostEl.value).init();
   host.setGrid(true);
   host.applyView('iso');
+  /* 注册 MCP 视图门面（与插件页互斥挂载，不会撞 viewportApi.pluginPreview） */
+  viewportApi.catalogPreview = catalogPreview;
   if (!selId.value && items.value.length) selId.value = items.value[0].id;
   else loadSel();
-  /* 尺寸/颜色等属性在右侧直接改对象 → 手动存盘 */
+  /* 名称 / 分类 / 颜色在右侧直接改对象 → 手动存盘；尺寸只读，只由模型实测写入 */
 });
 onBeforeUnmount(() => {
   clearTimeout(snapTimer);
+  if (viewportApi.catalogPreview === catalogPreview) delete viewportApi.catalogPreview;
   if (host) host.dispose();
   host = null;
 });
@@ -158,7 +242,11 @@ function removeItem(it) {
   toast('已从清单移除「' + (it.name || it.id) + '」（模型文件仍在项目里）');
 }
 
-/* 按模型实测尺寸：重新读一次 GLB 包围盒 */
+/* 尺寸只读展示：保留实测精度（最多 3 位），去掉无意义的尾随 0 */
+function fmtSize(v) { return String(Number(Number(v || 0).toFixed(3))); }
+
+/* 按模型实测尺寸：重新读一次 GLB 包围盒。这是同步「模型 → 尺寸」的唯一入口，
+ * 不是手动调尺寸；同名覆盖上传后点它可让显示值与新模型一致。 */
 async function measureSel() {
   const it = sel.value;
   if (!it || !it.model) { toast('这件家具还没指定模型', true); return; }
@@ -209,6 +297,21 @@ async function doPublish(bump) {
       <el-button size="small" @click="back">← 项目</el-button>
       <div class="proj-name">{{ S.proj ? S.proj.name + '  (' + S.proj.id + ')' : '' }}</div>
       <span class="cat-badge">家具包 · {{ items.length }} 件</span>
+      <!-- 静态家具编辑页已接入 MCP：常驻徽标 + 悬停列出可用能力 -->
+      <el-tooltip placement="bottom" :show-after="150">
+        <template #content>
+          <div style="max-width: 330px; font-size: 12px; line-height: 1.7">
+            <b>静态家具编辑页已接入 MCP 能力</b><br>
+            AI 可直接读取家具清单与 GLB 解析、读取分类、上传模型并配置属性、全量覆盖属性、批量删模型、导出 / 发布家具包；
+            还能点选左侧清单、旋转 / 平移 3D 视图并按机位截图，改动会实时同步到本页面。<br>
+            <span style="color: #9aa4b2">studio_list_catalog_items · studio_get_catalog_item · studio_get_catalog_types ·
+              studio_set_catalog_item · studio_upload_catalog_model · studio_delete_models · studio_select_catalog_item ·
+              studio_refresh_catalog · studio_get_catalog_selection ·
+              studio_view / studio_screenshot（公共） · studio_export_catalog · studio_publish_catalog</span>
+          </div>
+        </template>
+        <span class="mcp-badge">MCP 已接入</span>
+      </el-tooltip>
       <div class="spacer"></div>
       <div class="topbar-right">
         <span class="save-state">{{ S.saveState }}</span>
@@ -253,6 +356,7 @@ async function doPublish(bump) {
           <p v-if="unusedModels.length" class="list-warn">
             有 {{ unusedModels.length }} 个模型还没被任何家具引用：{{ unusedModels.join('、') }}
           </p>
+          <p class="mcp-note">静态家具编辑页已接入 MCP：AI 可读取清单与模型解析、上传 GLB、覆盖属性、批量删模型、点选清单、旋转 / 平移视图并截图、导出 / 发布家具包。</p>
         </div>
         <input ref="fileInput" type="file" accept=".glb,model/gltf-binary" multiple style="display: none" @change="onFilePick">
       </aside>
@@ -295,14 +399,14 @@ async function doPublish(bump) {
 
           <div class="size-head">
             <span>尺寸（米）</span>
-            <button type="button" class="mini" @click="measureSel">按模型实测</button>
+            <button type="button" class="mini" title="重新读取 GLB 包围盒，把尺寸同步为模型实测值" @click="measureSel">按模型实测</button>
           </div>
           <div class="size-grid">
-            <label>宽 W<el-input-number v-model="sel.w" size="small" :min="0.01" :step="0.05" :precision="2" controls-position="right" @change="scheduleSave()" /></label>
-            <label>深 D<el-input-number v-model="sel.d" size="small" :min="0.01" :step="0.05" :precision="2" controls-position="right" @change="scheduleSave()" /></label>
-            <label>高 H<el-input-number v-model="sel.h" size="small" :min="0.01" :step="0.05" :precision="2" controls-position="right" @change="scheduleSave()" /></label>
+            <label>宽 W<span class="size-val">{{ fmtSize(sel.w) }}</span></label>
+            <label>深 D<span class="size-val">{{ fmtSize(sel.d) }}</span></label>
+            <label>高 H<span class="size-val">{{ fmtSize(sel.h) }}</span></label>
           </div>
-          <p class="hint">W / D 决定 2D 平面图里的占位大小，H 只用于 3D 摆放参考</p>
+          <p class="hint">尺寸来自模型实测，只读、不能手动调；实际大小到 ha-3d-home 里用「整体比例缩放」调整。W / D 决定 2D 平面图的占位，H 用于 3D 摆放参考。覆盖上传模型后可点「按模型实测」同步。</p>
 
           <label class="row">兜底色
             <el-color-picker v-model="sel.color" size="small" @change="scheduleSave()" />
@@ -325,7 +429,7 @@ async function doPublish(bump) {
 
         <template v-else>
           <h3>家具属性</h3>
-          <p class="hint">左侧选中一件家具后在这里改名称 / 分类 / 尺寸；导入 GLB 会自动生成一条并量好尺寸。</p>
+          <p class="hint">左侧选中一件家具后在这里改名称 / 分类 / 兜底色；导入 GLB 会自动生成一条并按模型实测填好尺寸（尺寸只读）。</p>
         </template>
       </aside>
     </div>
@@ -363,6 +467,11 @@ async function doPublish(bump) {
 .cat-badge {
   font-size: 11px; color: var(--accent); background: rgba(47,127,224,.1);
   border: 1px solid rgba(47,127,224,.25); border-radius: 999px; padding: 2px 10px; white-space: nowrap;
+}
+/* .mcp-badge 的样式放在全局 style.css（插件编辑页顶栏也要用），这里只放家具页独有的说明行 */
+.list-foot .mcp-note {
+  margin: 8px 2px 0; font-size: 10.5px; line-height: 1.6; color: var(--fg-dim);
+  border-top: 1px dashed var(--line); padding-top: 6px;
 }
 
 .cat-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 268px 1fr 288px; }
@@ -442,7 +551,13 @@ async function doPublish(bump) {
 .mini:hover { border-color: var(--accent); background: #f6faff; }
 .size-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 4px; }
 .size-grid label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-dim); }
-.size-grid label :deep(.el-input-number) { flex: 1; }
+/* 只读尺寸值：像输入框但不可编辑，明确区分于可改字段 */
+.size-val {
+  flex: 1; text-align: right; font-size: 12px; color: var(--fg);
+  font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+  background: var(--bg3); border: 1px solid var(--line); border-radius: 4px;
+  padding: 4px 8px; cursor: default; user-select: text;
+}
 .prop-foot { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
 code { font-family: ui-monospace, Menlo, monospace; background: var(--bg3); border-radius: 4px; padding: 0 4px; }
 .pub-sub { font-size: 12px; color: var(--fg-dim); margin-bottom: 12px; line-height: 1.7; }

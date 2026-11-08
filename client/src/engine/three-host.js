@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { clamp } from './math';
+import { applyLegacyRenderer } from './three-legacy';
 
 const D2R = Math.PI / 180;
 
@@ -50,14 +51,19 @@ export class ThreeHost {
   init() {
     const el = this.container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    /* 与 home（three r147 legacy）同口径：线性输出 + 老灯光单位，
+       否则 studio 里插件贴图会发白掉饱和、大屏又是另一个色（见 three-legacy.js） */
+    applyLegacyRenderer(this.renderer);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setClearColor(0xeef1f5, 1);
+    /* 底板色对齐 home display.html 的 #stage（#fafbfd），空白天区不再偏灰 */
+    this.renderer.setClearColor(0xfafbfd, 1);
     el.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xeef1f5);
+    this.scene.background = new THREE.Color(0xfafbfd);
 
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 500);
+    /* FOV 50 与 home view3d 一致：同样的机位/距离下取景比例才对得上 */
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 500);
     this.camera.position.set(2.2, 1.8, 2.6);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -68,14 +74,13 @@ export class ThreeHost {
     this.controls.maxDistance = 200;
     this.controls.maxPolarAngle = Math.PI * 0.98;
 
-    /* 灯光：半球光打底 + 主平行光 + 补光，保证不开阴影也能看清体积 */
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c0cc, 1.15));
-    const key = new THREE.DirectionalLight(0xffffff, 0.78);
-    key.position.set(4, 8, 5);
+    /* 灯光：与 home view3d 完全同款机位/参数（hemi 1.05 + dir 0.5）。
+     * 上面已把渲染器切到 legacy 灯光口径（×PI），参数相同 = 亮度相同；
+     * 不要在这里再按物理光习惯调强度，否则 Lambert 物体会过曝洗白 */
+    this.scene.add(new THREE.HemisphereLight(0xdfeaff, 0x8a7a66, 1.05));
+    const key = new THREE.DirectionalLight(0xffffff, 0.5);
+    key.position.set(8, 14, 6);
     this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0xdfe8ff, 0.32);
-    fill.position.set(-5, 3, -4);
-    this.scene.add(fill);
 
     this.grid = new THREE.GridHelper(20, 40, 0xc4ccd8, 0xdde3ec);
     this.grid.material.transparent = true;
@@ -446,6 +451,8 @@ export class ThreeHost {
       if (opts.withGrid != null && this.grid) this.grid.visible = !!opts.withGrid;
 
       tmp = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      /* 截图用的是另一个渲染器：口径必须和主视口一致，否则 MCP 截出来的图与实际画面对不上 */
+      applyLegacyRenderer(tmp);
       tmp.setPixelRatio(1);
       tmp.setSize(w, h, false);
       const transparent = opts.background === null;

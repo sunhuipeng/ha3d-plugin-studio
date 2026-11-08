@@ -124,6 +124,20 @@ AI 生成的 `plugin.js` 里常把 `styles` / `options` 写死（生成那一刻
   - 发布：页面「发布到 ha-3d-home」/ `POST /api/projects/:id/publish-catalog`（同一个远程安装接口，home 按包内 `kind` 分流到 `custom/models/<项目id>/`，包内 `id` 必须与 `?id` 一致）
   - 插件端点（`/export`、`/publish`）遇到 `catalog` 项目会直接 400 并指路，不会打出半套插件包
 - **home 侧条目 id**：`<项目id>:<条目id>`，所以不同家具包用同名条目（都叫 `sofa`）也不会互相覆盖。
+- **MCP 操作家具项目**（`server/mcp/tools-catalog.js`，与插件那套工具分开）：
+
+  | 工具 | 作用 |
+  | --- | --- |
+  | `studio_list_catalog_items` | 列出当前页全部家具（属性 + 模型文件信息 + 可选 GLB 摘要），`saveTo` 可把全部 `.glb` 导出到本机；附分类、未引用模型、校验结果、item.json 预览 |
+  | `studio_get_catalog_item` | 单件详情：右侧面板全量属性 + GLB 深度解析（节点树 / mesh / 材质贴图 / 动画 / 扩展 / 世界包围盒实测 w·d·h），`saveTo` 导出该 GLB |
+  | `studio_get_catalog_types` | 读取现有家具类型（= 编辑页分类下拉全量：来自 home 的 `types`），并统计当前包各分类用了几件 |
+  | `studio_set_catalog_item` | **全量属性覆盖**：`itemId + item` 单件整条替换，或 `items` 整张清单替换；`merge=true` 才增量合并；可选 `meta` 改包名/版本/说明 |
+  | `studio_upload_catalog_model` | 上传本机 GLB（可多个）+ 右侧属性配置；未给的尺寸按 GLB 实测自动填；**同名模型直接覆盖**（更新原条目，不新增重复家具） |
+  | `studio_delete_catalog_item` | 移除条目（可选连模型文件一起删；别的家具还在用该模型时会拦下） |
+  | `studio_export_catalog` / `studio_publish_catalog` | 导出家具包 zip / 发布到 ha-3d-home |
+
+  写操作会落盘 `project.json` 并通过 WebSocket 推 `what:'catalog'`：编辑页重拉清单、取消挂着的防抖保存（避免旧内存覆盖 AI 的改动）、刷新模型列表与 3D 预览。插件专用工具（`get_code` / `write_code` / `sync_config` / 预览中继 / 插件发布）落到家具项目时会直接指路，不会白等中继超时；`studio_get_project` 对家具项目额外返回 `catalog` 整张清单。
+  GLB 深度解析复用 `split-glb.js` 的 chunk 解析与列主序矩阵工具（同一份口径），插件页 `studio_get_model(detail=true)` 也用它。
 
 ### 6. 离线打包与在线安装
 
@@ -196,7 +210,9 @@ server/            Node 服务端（Express, 端口 8098）
   routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布 / 家具包）
   catalog-schema.js 家具项目的数据形状 + 校验 + item.json 清单构建（纯函数）
   catalog-pkg.js   家具包打包 + 远程发布（item.json + 多个平铺 glb）
-  mcp/             30 个 MCP 工具定义（按域拆分：config/preview/projects/models/publish/lock + helpers）
+  catalog-types.js 家具分类枚举（优先取 home 的 /api/catalog，失败回落兜底）
+  glb-info.js      GLB 深度解析（节点树/材质/贴图/动画 + 世界包围盒实测尺寸，复用 split-glb 矩阵工具）
+  mcp/             38 个 MCP 工具（config/preview/projects/models/publish/lock/catalog + helpers）
   mcp-tools.js     MCP 工具装配薄壳（把上面各域 register 进 server）
   mcp-sse.js       MCP SSE 传输
   ws-hub.js        WebSocket 中继（服务端 ↔ 浏览器编辑页）

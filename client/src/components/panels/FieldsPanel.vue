@@ -5,6 +5,7 @@ import { S, act, scheduleSave, ENTITY_DOMAINS, engineFieldList } from '../../sto
 import {
   FIELD_TYPES, normalizeEnumValues, normalizeFieldType, suggestEnumTags,
 } from '../../field-schema';
+import { parseAttrsYaml } from '../../attrs-yaml';
 
 /* 字段的「值形态」推断：告诉使用者这个字段该绑什么、插件能读到什么。
    以面板上显式选的「字段类型」为准（valueType），枚举类直接把值列出来。 */
@@ -23,7 +24,8 @@ function kindHint(f) {
 /* 插件里怎么读这个字段 */
 function readHint(f) {
   const key = f.key || 'key';
-  return `代码里用 obj.${key} 拿实体 id，或 ctx.fieldState('${key}') 直接读状态`;
+  return `代码里用 obj.${key} 拿实体 id，ctx.fieldState('${key}') 读状态，`
+    + `ctx.getState(obj.${key}).attributes 读属性`;
 }
 
 /* 切换字段类型：把 enumValues 备好（切走不清空，切回来值还在） */
@@ -43,6 +45,19 @@ function enumOptions(f) {
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
 const LOCK = computed(() => S.lock.locked);
+
+/* 属性 YAML 的即时反馈：解析失败当场报行号，别等渲染 / 发布才暴露。
+   解析很快（几十行），每次渲染重算即可，不额外做防抖 */
+function attrState(f) {
+  const r = parseAttrsYaml(f.attributes);
+  if (r.empty) return { cls: 'empty', text: '可不填：留空时预览直接用该实体域的默认属性' };
+  if (!r.ok) return { cls: 'bad', text: '⚠ ' + r.error };
+  const head = r.keys.slice(0, 6).join('、');
+  return {
+    cls: 'ok',
+    text: `✓ 可解析 · ${r.keys.length} 个属性：${head}${r.keys.length > 6 ? ' …' : ''}`,
+  };
+}
 </script>
 
 <template>
@@ -89,6 +104,16 @@ const LOCK = computed(() => S.lock.locked);
         </el-select>
       </div>
 
+      <!-- 字段属性：HA 实体的 attributes（YAML）。给人 / AI 读，同时当预览模拟实体的初值 -->
+      <div class="fld-line">
+        <span>字段属性（YAML，实体 attributes 的示例；给人 / AI 看，并作为预览实体初值）</span>
+        <el-input :disabled="LOCK" v-model="f.attributes" type="textarea" class="yaml-input"
+          :autosize="{ minRows: 3, maxRows: 10 }" resize="vertical" spellcheck="false"
+          placeholder="friendly_name: 客厅空调&#10;temperature: 26&#10;hvac_action: heating"
+          @input="scheduleSave()" />
+        <span class="yaml-state" :class="attrState(f).cls">{{ attrState(f).text }}</span>
+      </div>
+
       <div class="field-note">
         <span class="field-kind">{{ kindHint(f) }}</span>
         <span class="field-read">{{ readHint(f) }}</span>
@@ -103,6 +128,8 @@ const LOCK = computed(() => S.lock.locked);
       字段是「插件级实体绑定」，所有样式共用。key 会注入 AI 上下文，插件代码里用
       <code>obj[key]</code> 拿实体 id、<code>ctx.fieldState('key')</code> 读状态；
       预览时按 key 自动造一个模拟实体（sensor.preview_&lt;key&gt;），左下角可以直接改值看效果。
+      字段类型 / 枚举值 / 字段属性都是「说明性元信息」——不参与渲染，随
+      <code>studio_get_project</code> 一起给 AI；字段属性里的 YAML 同时作为预览实体的 attributes 初值。
     </div>
   </section>
 </template>

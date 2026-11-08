@@ -1,17 +1,20 @@
 /* 字段（fields）的「值类型」元信息
  * ⚠ 与 server/field-schema.js 同口径双实现，改 valueType / enumValues 规则必须两处同步
  *
- * 这两个属性不参与任何渲染 / 状态判定，纯粹是给人（面板、提示词）和 AI（MCP studio_get_project）
- * 读的说明：这个字段绑的实体，值长什么样、可选值有哪些。
+ * 这些属性不参与任何渲染 / 状态判定，纯粹是给人（面板、提示词）和 AI（MCP studio_get_project）
+ * 读的说明：这个字段绑的实体，值长什么样、可选值有哪些、属性有哪些。
  *
  *   valueType    'number' 数值类 | 'text' 字符类 | 'enum' 枚举类
  *   enumValues   string[]，仅 enum 用（如 ['on', 'off'] / ['heat', 'cool', 'fan_only']）
+ *   attributes   string，实体 attributes 的 YAML 原文（如 `temperature: 26`）
  *
  * 归一化口径：
  *   · 没写 / 写了不认识的值 → 'text'（最宽松，不误导）
  *   · enumValues 允许存成 "on,off" 字符串（老数据 / 手改 JSON）→ 拆成数组、去空、去重
  *   · 非 enum 类型的 enumValues 保留但不展示（切回 enum 时值还在，不会白填一遍）
+ *   · attributes 统一成 LF 换行、去行尾空格与首尾空行的字符串（对象按 JSON 文本收）
  */
+import { normalizeAttrsYaml } from './attrs-yaml';
 
 export const FIELD_TYPE_VALUES = ['number', 'text', 'enum'];
 
@@ -46,6 +49,7 @@ export function normalizeField(f) {
   if (!f || typeof f !== 'object') return f;
   f.valueType = normalizeFieldType(f.valueType);
   f.enumValues = normalizeEnumValues(f.enumValues);
+  f.attributes = normalizeAttrsYaml(f.attributes);
   return f;
 }
 

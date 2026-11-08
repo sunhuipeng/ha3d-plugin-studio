@@ -107,6 +107,18 @@ function onPublishCmd(cmd) {
       <header id="topbar">
         <el-button size="small" @click="onBack">← 项目</el-button>
         <div class="proj-name">{{ S.proj ? S.proj.name + '  (' + S.proj.id + ')' : '' }}</div>
+        <!-- 插件编辑页已接入 MCP：常驻徽标 + 悬停列出常用能力（与家具页同款） -->
+        <el-tooltip placement="bottom" :show-after="150">
+          <template #content>
+            <div style="max-width: 330px; font-size: 12px; line-height: 1.7">
+              <b>插件编辑页已接入 MCP 能力</b><br>
+              AI 可直接读项目配置与代码、写入并重跑插件代码、同步样式 / 字段、上传与解析 GLB、调节参数、切换机位截图、体检运行时、导出 / 发布插件包。<br>
+              <span style="color: #9aa4b2">studio_get_project · studio_get_code · studio_write_code · studio_sync_config ·
+                studio_upload_model · studio_get_model · studio_screenshot · studio_get_runtime · studio_export_project · studio_publish_project</span>
+            </div>
+          </template>
+          <span class="mcp-badge">MCP 已接入</span>
+        </el-tooltip>
         <div class="spacer"></div>
         <!-- 右侧操作区：已保存 → 配置快照 → 发布，贴右边缘排布（右侧不留空白） -->
         <div class="topbar-right">

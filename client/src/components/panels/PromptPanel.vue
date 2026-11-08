@@ -102,6 +102,9 @@ const LOCK = computed(() => S.lock.locked);
             <div v-if="normalizeFieldType(f.valueType) === 'enum' && normalizeEnumValues(f.enumValues).length" class="ov-note">
               枚举：{{ normalizeEnumValues(f.enumValues).join(' / ') }}
             </div>
+            <div v-if="f.attributes" class="ov-note">属性（YAML，点击整段复制）：</div>
+            <pre v-if="f.attributes" class="ov-yaml" title="点击复制字段属性"
+              @click="copy(f.attributes, '字段属性')">{{ f.attributes }}</pre>
             <div v-if="f.placeholder" class="ov-note ph">占位：{{ f.placeholder }}</div>
           </div>
           <div v-if="!fields.length" class="ov-empty">还没有字段</div>

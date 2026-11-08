@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { z } = require('zod');
-const { modelsDir, ensureDir, readProject } = require('../config');
+const { modelsDir, ensureDir, readProject, writeProject } = require('../config');
 const { splitGlb, splitGlbOne } = require('../split-glb');
 const { fixGlbMaterials } = require('../fixglb');
 const hub = require('../ws-hub');
@@ -41,13 +41,14 @@ function register(server) {
 
   server.tool(
     'studio_get_model',
-    '把项目内 models/ 目录的 glb 模型导出（复制）到本机文件系统并返回绝对路径 + 结构摘要（网格/节点/材质/动画数、包围盒尺寸），AI 拿到路径后可用本地脚本深入分析模型（尺寸、顶点、部件拆解等）',
+    '把项目内 models/ 目录的 glb 模型导出（复制）到本机文件系统并返回绝对路径 + 结构摘要（网格/节点/材质/动画数、包围盒尺寸），AI 拿到路径后可用本地脚本深入分析模型（尺寸、顶点、部件拆解等）；detail=true 再附深度解析（节点树/逐 primitive 属性/材质贴图明细/世界包围盒实测 w·d·h）',
     {
       projectId: z.string().optional(),
       file: z.string().describe('模型文件名（见 studio_get_project 返回的 models[].file，如 frame.glb）'),
       saveTo: z.string().optional().describe('导出目标：目录（可以不存在，如 /tmp/models，会自动建）或完整文件路径（如 /tmp/models/frame.glb）；省略时存到系统临时目录 ha3d-models/<projectId>/ 下'),
+      detail: z.boolean().optional().describe('是否附带 GLB 深度解析明细（容器/节点树/材质/贴图/动画/扩展/世界包围盒实测尺寸），默认 false'),
     },
-    async ({ projectId, file, saveTo }) => {
+    async ({ projectId, file, saveTo, detail }) => {
       try {
         const pid = H.requirePid(projectId);
         const name = path.basename(String(file || ''));
@@ -78,14 +79,20 @@ function register(server) {
         fs.copyFileSync(src, dest);
 
         const buf = fs.readFileSync(src);
-        return H.text({
+        const row = {
           ok: true,
           projectId: pid,
           file: name,
           savedTo: dest,
           bytes: buf.length,
           glb: H.glbSummary(buf),
-        });
+        };
+        /* 深度明细与家具项目的 studio_get_catalog_item 共用同一份解析器 */
+        if (detail) {
+          try { row.glbDetail = H.glbDetail(buf); }
+          catch (e) { row.glbDetail = { error: e.message }; }
+        }
+        return H.text(row);
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -319,6 +326,127 @@ function register(server) {
               ? '以上是体检结果（没有写盘）；确认后去掉 dryRun 再调一次即可修复'
               : '已原地写盘（不留备份）。材质在 glb 内部，代码不用改；前端会自动绕过缓存重载模型（缩略图与画布同步刷新）'),
           models: H.modelsOut(pid),
+        });
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  /* 批量删除模型（公共能力）：一次可传多个文件，插件项目与家具包项目通用。
+   * 家具包里「一个 GLB = 一条清单条目」，默认连引用它的条目一起移除，避免留下空引用；
+   * 插件项目只删文件，并把代码里仍引用该文件的位置一并返回。 */
+  server.tool(
+    'studio_delete_models',
+    '一次删除项目 models/ 里指定的多个模型文件（files 数组，重复/不存在的会被去重或报告，不会中断整批）。'
+    + '插件项目：只删文件，返回每个文件在代码里的引用行（codeRefs），提醒改代码。'
+    + '家具包项目（catalog）：默认连引用这些模型的家具条目一起移除；也可用 itemIds 按清单条目 id 指定要删的模型。'
+    + 'removeCatalogItems=false 只删文件（会留下失效条目并给出警告）；dryRun=true 只返回删除计划、不落盘',
+    {
+      projectId: z.string().optional(),
+      files: z.array(z.string()).optional().describe('要删除的模型文件名数组，如 ["a.glb","b.glb"]'),
+      itemIds: z.array(z.string()).optional().describe('家具包专用：按清单条目 id 指定，自动解析成对应模型文件'),
+      removeCatalogItems: z.boolean().optional().describe('家具包默认 true：同时移除引用这些模型的清单条目'),
+      dryRun: z.boolean().optional().describe('默认 false；true 只返回计划，不删文件也不改配置'),
+    },
+    async ({ projectId, files, itemIds, removeCatalogItems, dryRun }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const proj = readProject(pid);
+        const kind = (proj.plugin || {}).kind || 'device';
+        const items = (proj.catalog && Array.isArray(proj.catalog.items)) ? proj.catalog.items : [];
+        const dir = modelsDir(pid);
+
+        /* 汇总待删文件名：files + itemIds 解析出来的 model，去重、挡目录穿越 */
+        const requested = [];
+        const invalid = [];
+        const missingItems = [];
+        for (const raw of (Array.isArray(files) ? files : [])) {
+          const name = path.basename(String(raw || '').trim());
+          if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.glb$/i.test(name)) { invalid.push(String(raw)); continue; }
+          if (!requested.includes(name)) requested.push(name);
+        }
+        for (const rawId of (Array.isArray(itemIds) ? itemIds : [])) {
+          const id = String(rawId || '');
+          const it = items.find((x) => x && x.id === id);
+          if (!it) { missingItems.push(id); continue; }
+          const name = path.basename(String(it.model || ''));
+          if (name && !requested.includes(name)) requested.push(name);
+        }
+        if (!requested.length) {
+          return H.fail('没有可删除的模型：请传 files（多个文件名）或 itemIds（家具条目 id）。'
+            + (invalid.length ? ` 非法文件名：${invalid.join(', ')}` : '')
+            + (missingItems.length ? ` 找不到的条目：${missingItems.join(', ')}` : ''));
+        }
+
+        /* 先算完整计划再动手：缺文件 / 非法名都只是逐条报告，不影响其它文件 */
+        const plan = [];
+        const codeRefs = {};
+        for (const name of requested) {
+          const abs = path.join(dir, name);
+          const exists = fs.existsSync(abs);
+          const refs = exists ? H.codeRefLines(pid, name) : [];
+          if (refs.length) codeRefs[name] = refs;
+          plan.push({
+            file: name,
+            exists,
+            bytes: exists ? fs.statSync(abs).size : 0,
+            referencedBy: items.filter((x) => x && x.model === name).map((x) => x.id),
+            codeRefs: refs.length,
+            action: exists ? 'delete' : 'notFound',
+          });
+        }
+        const toDelete = plan.filter((p) => p.action === 'delete').map((p) => p.file);
+        const notFound = plan.filter((p) => p.action === 'notFound').map((p) => p.file);
+        const removeItems = kind === 'catalog' && removeCatalogItems !== false;
+        const hitItems = items.filter((x) => x && requested.includes(x.model));
+        const removedItems = removeItems
+          ? hitItems.map((x) => ({ id: x.id, name: x.name, model: x.model }))
+          : [];
+        const orphanItems = (kind === 'catalog' && !removeItems) ? hitItems.map((x) => x.id) : [];
+        const remainingItems = removeItems
+          ? items.filter((x) => !(x && requested.includes(x.model)))
+          : items;
+
+        if (dryRun) {
+          return H.text({
+            ok: true, dryRun: true, projectId: pid, kind,
+            plan, toDelete, notFound, invalid, missingItems,
+            removedItems, orphanItems, codeRefs,
+            remainingItemCount: remainingItems.length,
+            hint: '这是预演：没有删任何文件、也没有改配置；去掉 dryRun 才会真正执行',
+          });
+        }
+
+        const deleted = [];
+        for (const name of toDelete) {
+          fs.unlinkSync(path.join(dir, name));
+          deleted.push(name);
+        }
+        let notified = false;
+        if (kind === 'catalog' && removeItems) {
+          proj.catalog ||= {};
+          proj.catalog.items = remainingItems;
+          writeProject(pid, proj);
+          notified = hub.notify(pid, { type: 'refresh', what: 'catalog', files: deleted, bump: deleted.length > 0 });
+        } else {
+          notified = hub.notify(pid, { type: 'refresh', what: 'models', files: deleted });
+        }
+
+        return H.text({
+          ok: true,
+          projectId: pid, kind,
+          requested, deleted, notFound, invalid, missingItems,
+          removedItems, orphanItems, codeRefs,
+          remaining: { models: H.modelsOut(pid), itemCount: remainingItems.length, items: remainingItems },
+          notified,
+          warning: [
+            orphanItems.length ? `有 ${orphanItems.length} 件家具仍指向已删除的模型：${orphanItems.join(', ')}（预览/发布会失败）` : '',
+            Object.keys(codeRefs).length ? `代码里仍有引用：${Object.keys(codeRefs).join(', ')}，详见 codeRefs` : '',
+            notFound.length ? `未找到：${notFound.join(', ')}` : '',
+            invalid.length ? `文件名不合法已跳过：${invalid.join(', ')}` : '',
+          ].filter(Boolean).join('；'),
+          hint: kind === 'catalog'
+            ? '模型文件与引用它们的家具条目已一起删除，编辑页会自动刷新清单'
+            : '模型文件已删除；如 codeRefs 非空，请改掉代码里的引用再提交',
         });
       } catch (e) { return H.fail(e.message); }
     },

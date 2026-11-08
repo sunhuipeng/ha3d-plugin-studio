@@ -18,6 +18,7 @@ const { modelsDir, readProject, safeId, listModels } = require('../config');
 const { normalizeOptionType } = require('../option-schema');
 const { normalizeFieldType, normalizeEnumValues, splitList } = require('../field-schema');
 const hub = require('../ws-hub');
+const { glbDetail, measureGlb } = require('../glb-info');
 
 /* ---- 工具返回值 ---- */
 const text = (s) => ({ content: [{ type: 'text', text: typeof s === 'string' ? s : JSON.stringify(s, null, 2) }] });
@@ -94,10 +95,12 @@ function fieldsOut(p) {
       placeholder: f.placeholder || '',
       tip: f.tip || '',
       entityId: f.entityId || '',
-      /* 值类型与枚举值只是给人 / AI 读的说明，引擎渲染不用它们 */
+      /* 值类型 / 枚举值 / 字段属性只是给人 / AI 读的说明，引擎渲染不用它们 */
       valueType,
     };
     if (valueType === 'enum') out.enumValues = normalizeEnumValues(f.enumValues);
+    /* attributes 是 YAML 原文（可能多行），原样带出去，AI 才能读到实体的属性结构 */
+    if (f.attributes) out.attributes = String(f.attributes);
     return out;
   });
 }
@@ -107,6 +110,10 @@ function stylesOut(p) {
     name: s.name || s.id,
     desc: s.desc || '',
     z: s.z,
+    labelOffset: s.labelOffset,
+    /* 背景刷新率（Hz，0=静态）：与 studio_sync_config 的 styles[].refresh 对齐，
+     * 否则 get_project 读不到、AI 用「最终版清单」回写时会把动态背景降级成静态 */
+    refresh: typeof s.refresh === 'number' ? s.refresh : undefined,
     icon: s.icon || '',
     options: (s.options || []).map((o) => ({
       key: o.key, label: o.label || o.key, type: normalizeOptionType(o.type),
@@ -119,6 +126,37 @@ function modelsOut(pid) {
     ...m,
     url: `/api/projects/${pid}/models/${encodeURIComponent(m.file)}`,
   }));
+}
+
+/* 家具项目（kind:'catalog'）的清单：get_project 里一并给出，避免 AI 面对家具包时读不到条目 */
+function catalogOut(p) {
+  const items = (p.catalog && Array.isArray(p.catalog.items)) ? p.catalog.items : [];
+  return {
+    packId: p.id || '',
+    version: p.plugin?.version || '',
+    description: p.plugin?.description || '',
+    count: items.length,
+    items: items.map((it) => ({ ...it })),
+    note: '一条 = 一个 GLB 模型；导出家具包时写成 item.json 的 items[]。'
+      + '发布到 home 后的条目 id 是 "<项目id>:<条目id>"。',
+  };
+}
+
+/* 家具项目没有「插件代码 / 样式参数 / 实体 / 插件预览引擎」：
+ * 插件专用工具若落到 furniture 项目上，中继会白等 30~90 秒才超时。
+ * 这里早期挡掉并给出家具工具清单（catalog 工具自己用 requirePid，不走这个函数）。 */
+function assertPluginProject(projectId) {
+  const pid = requirePid(projectId);
+  const proj = readProject(pid);
+  if (proj.plugin && proj.plugin.kind === 'catalog') {
+    throw new Error(`项目 ${pid} 是家具包（kind: catalog），没有插件代码 / 样式 / 实体 / 插件预览引擎。`
+      + '家具项目请用：studio_list_catalog_items、studio_get_catalog_item、studio_set_catalog_item、'
+      + 'studio_upload_catalog_model、studio_get_catalog_types、studio_select_catalog_item、'
+      + 'studio_delete_catalog_item、studio_export_catalog、studio_publish_catalog；'
+      + '视图 / 截图 / 模型文件操作用公共工具：studio_view、studio_screenshot、studio_list_models、'
+      + 'studio_get_model、studio_upload_model、studio_delete_models、studio_split_model、studio_fix_model_materials');
+  }
+  return pid;
 }
 
 /* 项目配置全貌（不含代码）：开工前用它建上下文 */
@@ -135,6 +173,8 @@ function projectConfig(p, pid) {
     styles: stylesOut(p),
     fields: fieldsOut(p),
     models: modelsOut(pid),
+    /* 家具项目才有：左侧清单的全部条目（插件项目不出现这个字段） */
+    ...(p.plugin?.kind === 'catalog' ? { catalog: catalogOut(p) } : {}),
     code: {
       source: 'customJs',
       lines: String(p.customJs || '').split('\n').length,
@@ -266,8 +306,8 @@ function wrapToolActivity(server) {
 
 module.exports = {
   text, fail,
-  resolveProjectId, requirePid, friendlyRelayError,
+  resolveProjectId, requirePid, assertPluginProject, friendlyRelayError,
   SCREEN_VIEWS, modelsWithSize, codeRefLines,
-  settingsOut, fieldsOut, stylesOut, modelsOut, projectConfig,
-  glbSummary, wrapToolActivity,
+  settingsOut, fieldsOut, stylesOut, modelsOut, catalogOut, projectConfig,
+  glbSummary, glbDetail, measureGlb, wrapToolActivity,
 };

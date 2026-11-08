@@ -327,4 +327,8 @@ function splitGlbOne(buf, baseName, nodeName) {
   return [{ file, node: target.name, data: buildGlb([target], remap([target])) }];
 }
 
-module.exports = { splitGlb, splitGlbOne };
+module.exports = {
+  splitGlb, splitGlbOne,
+  /* 供 glb-info.js 复用：GLB 容器解析 + 列主序矩阵工具（同一份口径，别再写第二套） */
+  parseGlb, MAT4_IDENT, mat4FromTRS, mat4Mul, transformPoint,
+};

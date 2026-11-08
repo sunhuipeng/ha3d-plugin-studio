@@ -16,6 +16,8 @@ import { S, act } from '../store';
 const createVisible = ref(false);
 const newName = ref('');
 const newKind = ref('device');
+const advancedOpen = ref(false);   // 新建弹窗里的「高级用法」说明，默认收起
+const SKILL_REPO = 'https://gitee.com/sunhuip/ha3d-skill';
 const CREATE_KINDS = [
   { kind: 'device', title: '设备插件', desc: '灯 / 开关 / 空调 / 门 / 窗…，带实体绑定与样式参数' },
   { kind: 'background', title: '背景插件', desc: '户外地面、庭院铺装等铺在户型外围的 3D 背景' },
@@ -24,6 +26,7 @@ const CREATE_KINDS = [
 function openCreate() {
   newName.value = '';
   newKind.value = 'device';
+  advancedOpen.value = false;
   createVisible.value = true;
 }
 async function doCreate() {
@@ -256,7 +259,39 @@ function kindLabel(p) {
           <span>{{ k.desc }}</span>
         </button>
       </div>
-      <p class="hint" style="margin: 8px 0 10px">项目类型创建后不可更改（两类项目的编辑页与产物完全不同）</p>
+      <p class="hint" style="margin: 8px 0 10px">项目类型创建后不可更改：插件类（设备 / 背景）与家具包的编辑页、产物完全不同</p>
+
+      <!-- 高级用法：默认收起，展开后按三类项目分组说明玩法与 AI 提示词建议 -->
+      <div class="advanced" :class="{ open: advancedOpen }">
+        <button type="button" class="adv-toggle" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">
+          <span class="adv-tag">高级用法</span>
+          <span class="adv-title">三类项目，不止于名字本身</span>
+          <span class="adv-more">{{ advancedOpen ? '收起' : '展开查看' }}</span>
+          <span class="adv-arrow" :class="{ up: advancedOpen }">⌄</span>
+        </button>
+        <div v-if="advancedOpen" class="adv-body">
+          <p class="adv-lead">类型只决定数据结构，不决定玩法。大胆组合、自由发挥就好。</p>
+
+          <div class="adv-row">
+            <span class="adv-k k-catalog">家具包</span>
+            <p><b>全静态的家具集合</b>：造型固定、不需要交互调节，一次导入多个 GLB，整包发布到 home。</p>
+          </div>
+          <div class="adv-row">
+            <span class="adv-k k-bg">背景插件</span>
+            <p><b>房屋之外的整个世界</b>：地面、天空，以及云朵、下雨、太阳、小鸟等环境与氛围，都交给它，支持动态效果。</p>
+          </div>
+          <div class="adv-row">
+            <span class="adv-k k-dev">设备类插件</span>
+            <p><b>最灵活的一类</b>：既能写灯、开关、空调等各式家电，也能做「带调节参数的静态设备」，把静态设备当家具用 —— 长宽高可调的衣柜、单开门 / 多开门可切换的柜体等。</p>
+          </div>
+
+          <div class="adv-tip">
+            <b>用 AI Agent 开发时</b>：提示词尽量写完整 —— 项目类型、造型结构、尺寸、材质配色、需要哪些可调参数、期望视角；<b>有参考图最好一起提供</b>，还原度会明显更高。
+          </div>
+          <p class="adv-link">配套 Skill 技能：<a :href="SKILL_REPO" target="_blank" rel="noopener noreferrer">{{ SKILL_REPO }}</a></p>
+        </div>
+      </div>
+
       <el-input v-model="newName" placeholder="项目名称，如：卧室吊灯 / 客厅家具套装" @keydown.enter="doCreate" autofocus />
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -396,4 +431,31 @@ function kindLabel(p) {
 .kind-opt:hover { border-color: var(--accent); background: #f6faff; }
 .kind-opt.on { border-color: var(--accent); background: rgba(47,127,224,.08); box-shadow: 0 0 0 1px var(--accent) inset; }
 .kind-opt.on b { color: var(--accent); }
+
+/* 新建项目弹窗里的「高级用法」说明（默认收起，展开后完整平铺、不做内部滚动） */
+.advanced { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); overflow: hidden; }
+.adv-toggle {
+  width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 11px;
+  border: 0; background: transparent; cursor: pointer; font: inherit; color: var(--fg); text-align: left;
+}
+.adv-toggle:hover { background: #f6faff; }
+.adv-tag { flex: none; padding: 2px 7px; border-radius: 5px; background: rgba(47,127,224,.12); color: var(--accent); font-size: 11px; font-weight: 600; }
+.adv-title { flex: 1; font-size: 12px; color: var(--fg-dim); }
+.adv-more { flex: none; font-size: 11px; color: var(--accent); }
+.adv-arrow { flex: none; display: inline-block; font-size: 15px; line-height: 1; color: var(--fg-dim); transition: transform .18s; }
+.adv-arrow.up { transform: rotate(180deg); }
+.adv-body { padding: 0 12px 12px; border-top: 1px solid var(--line); }
+.adv-lead { margin: 10px 0 12px; font-size: 12px; line-height: 1.6; color: var(--fg-dim); }
+.adv-row { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 9px; }
+.adv-k { flex: 0 0 68px; padding: 3px 0; border-radius: 5px; text-align: center; font-size: 11px; font-weight: 600; }
+.adv-k.k-catalog { background: rgba(126, 87, 194, .11); color: #7452bd; }
+.adv-k.k-bg { background: rgba(47, 127, 224, .11); color: #2f7fe0; }
+.adv-k.k-dev { background: rgba(214, 133, 36, .13); color: #b87414; }
+.adv-row p { margin: 0; font-size: 12px; line-height: 1.65; color: var(--fg); }
+.adv-row p b { font-weight: 600; }
+.adv-tip { margin: 12px 0 9px; padding: 9px 10px; border-radius: 8px; background: #f4f8ff; border: 1px solid rgba(47,127,224,.16); font-size: 12px; line-height: 1.7; color: var(--fg); }
+.adv-tip b { color: var(--accent); }
+.adv-link { margin: 0; font-size: 12px; color: var(--fg-dim); }
+.adv-link a { color: var(--accent); text-decoration: none; word-break: break-all; }
+.adv-link a:hover { text-decoration: underline; }
 </style>

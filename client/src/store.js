@@ -69,6 +69,8 @@ export const S = reactive({
    * ha-3d-home 的 /api/catalog 取，取不到才用本地兜底表）。source = 'home' | 'fallback' */
   catalogTypes: FALLBACK_CATALOG_TYPES.slice(),
   catalogTypesSource: '',
+  /* MCP 改了家具清单后 +1：CatalogEditor 监听它重载 3D 预览（选中的条目对象可能被整条替换） */
+  catalogEpoch: 0,
 });
 
 /* 视口组件注册进来的能力（地面/归零等需要 three 场景） */
@@ -200,7 +202,11 @@ export function syncEngineMirror(preview) {
     S.engineStyles = null; S.engineFields = null; S.codeBaseline = null; return;
   }
   S.engineStyles = reactive(preview.def.styles || []);
-  S.engineFields = reactive(preview.def.fields || []);
+  /* 代码里声明的字段也走一遍归一化：v-model 绑到 undefined 的 attributes / enumValues
+     会被 Element Plus 当成空串或非预期值，先补齐成标准形态（不改变已有值） */
+  const liveFields = preview.def.fields || [];
+  liveFields.forEach((f) => normalizeField(f));
+  S.engineFields = reactive(liveFields);
   S.codeBaseline = preview.def._baseline || null;
   refreshDrift();
 }
@@ -233,6 +239,16 @@ export function curStyle() {
 }
 
 let saveTimer = null;
+
+/* MCP 直接写了磁盘上的 project.json：前端内存已过期。
+ * 取消挂着的防抖保存，避免旧内存 900ms 后把 AI 刚写的家具清单覆盖回去。
+ * 由 ws-client 在收到 what:'catalog' 刷新通知、拉到新配置后调用。 */
+export function cancelPendingSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  S.saveState = '已保存 ✓';
+}
+
 export function scheduleSave() {
   if (!S.proj) return;
   /* 锁只作用在左侧浮层面板（那边控件已只读）；中间编辑区（左下角参数卡等）照常可改可存，
@@ -443,7 +459,10 @@ export const act = {
   },
   addField() {
     if (denyWhenLocked()) return;
-    const f = { key: '', label: '', domains: [], placeholder: '', tip: '', valueType: 'text', enumValues: [] };
+    const f = {
+      key: '', label: '', domains: [], placeholder: '', tip: '',
+      valueType: 'text', enumValues: [], attributes: '',
+    };
     S.proj.fields.push(f);
     /* 同一对象进内存 def.fields：字段编辑既立即生效又直接持久化 */
     if (S.engineFields) S.engineFields.push(f);

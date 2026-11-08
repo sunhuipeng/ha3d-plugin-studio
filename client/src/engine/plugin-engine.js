@@ -49,6 +49,37 @@ function refreshOf(item) {
   return Math.max(1, Math.min(30, Math.round(n)));
 }
 
+/* 扩展实体字段读取 API：设备 model3d(ctx) 与背景 apply(ctx) 共用同一份实现。
+ * 绑定值一律来自 obj[key]（预览里由 _makeObj 造出，项目配置可覆盖），状态统一走注入的 ha。
+ * 背景的顶层 onData(fields, api) 另由 notifyBackgroundData() 主动把状态表推给插件。 */
+function makeFieldApi(ha, obj) {
+  const api = {
+    field(key) { return (obj && obj[key]) || null; },
+    hasField(key) { return !!(obj && obj[key]); },
+    fieldState(key) { const eid = obj && obj[key]; return eid ? ha.getState(eid) : null; },
+    fieldOn(key) { const eid = obj && obj[key]; return eid ? ha.isOn(eid) : false; },
+    fieldNum(key) {
+      const st = api.fieldState(key);
+      if (!st || st.state == null) return null;
+      return api.toNum(st.state);
+    },
+    fieldText(key) {
+      const st = api.fieldState(key);
+      if (!st) return '';
+      const unit = (st.attributes && st.attributes.unit_of_measurement) || '';
+      return st.state + (unit ? ' ' + unit : '');
+    },
+    toNum(v) {
+      if (v == null) return null;
+      const s = String(v);
+      if (s === '' || s === 'unknown' || s === 'unavailable') return null;
+      const n = parseFloat(s);
+      return isNaN(n) ? null : n;
+    },
+  };
+  return api;
+}
+
 /* plan2d 的公共绘制原语（照搬 ha-3d-home/public/js/plugins.js 的 planKit）：
  *   p.rrect(x, y, w, h, rad)  只建圆角矩形路径（不填不描），可继续自己 stroke
  *   p.draw(fn, opts)          fn 里只建路径，结束后统一按调色板填色 + 描边
@@ -606,34 +637,11 @@ export function createPluginEngine(deps) {
           if (!st) return null;
           return (st.state === 'on' || st.state === 'open') ? 1 : 0;
         },
-        toNum(v) {
-          if (v == null) return null;
-          const s = String(v);
-          if (s === '' || s === 'unknown' || s === 'unavailable') return null;
-          const n = parseFloat(s);
-          return isNaN(n) ? null : n;
-        },
-
-        /* ---- 扩展实体字段（fields 声明，值挂在 obj[key]） ---- */
-        field(key) { return (obj && obj[key]) || null; },
-        hasField(key) { return !!(obj && obj[key]); },
-        fieldState(key) { const eid = obj && obj[key]; return eid ? ha.getState(eid) : null; },
-        fieldOn(key) { const eid = obj && obj[key]; return eid ? ha.isOn(eid) : false; },
-        fieldNum(key) {
-          const st = ctx.fieldState(key);
-          if (!st || st.state == null) return null;
-          return ctx.toNum(st.state);
-        },
-        fieldText(key) {
-          const st = ctx.fieldState(key);
-          if (!st) return '';
-          const unit = (st.attributes && st.attributes.unit_of_measurement) || '';
-          return st.state + (unit ? ' ' + unit : '');
-        },
 
         render() { onRender(); },
         animate(fn) { state.anim = fn; },
-      }, (extra && extra.ctx) || {});
+        /* 扩展实体字段（fields 声明，值挂在 obj[key]）：与背景 ctx 共用 makeFieldApi */
+      }, makeFieldApi(ha, obj), (extra && extra.ctx) || {});
 
       return { ctx, state };
     },
@@ -654,6 +662,12 @@ export function createPluginEngine(deps) {
     _spawnBackground(style, options, o) {
       const T = THREE;
       const o2 = o || {};
+      /* 顶层 onData 契约（与 home 同口径）：def.fields 声明订阅哪些实体，
+       * def.onData(fields, api) 在数据变化时回调。绑定值取自预览 obj[key]。 */
+      const def = o2.def || null;
+      const dataObj = o2.obj || {};
+      const dataFn = (def && typeof def.onData === 'function') ? def.onData : null;
+      const dataFields = (def && Array.isArray(def.fields)) ? def.fields.filter((f) => f && f.key) : [];
       const W = Math.min(100, Math.max(2, Number(o2.safeW) || 8));    /* 长（米，X 向） */
       const D = Math.min(100, Math.max(2, Number(o2.safeD) || 8));    /* 宽（米，Z 向） */
       const H = 8;                                                    /* 占位高（米） */
@@ -695,21 +709,22 @@ export function createPluginEngine(deps) {
 
       const plane = (src, sizeM) => {
         const tex = (src && src.isTexture) ? src : new T.CanvasTexture(src);
-        tex.anisotropy = 8;
+        /* 与 home 的 mkPlane 完全同口径：各向异性上限 4、受光 Lambert 材质。
+         * 之前这里用的是 MeshBasic + anisotropy 8，虽然"不会被灯光洗白"，
+         * 但大屏上的地面是吃光的（Lambert），两边色差就出在这里 */
+        tex.anisotropy = 4;
         tex.needsUpdate = true;
         const m = sizeM || planeM;
         const mesh = new T.Mesh(
           new T.PlaneGeometry(m, m),
-          /* 用不受光照的 Basic 材质：底图画什么样显示什么样，
-             不会被场景灯光过曝洗白 */
-          new T.MeshBasicMaterial({ map: tex })
+          new T.MeshLambertMaterial({ map: tex })
         );
         mesh.rotation.x = -Math.PI / 2;
         /* 平面中心 = 背景中心（原点），不是房屋中心：房屋按 house.cx/cy 偏到一边 */
         mesh.position.set(0, -0.05, 0);   // 压到地板下方一点，避免 z-fighting
         return mesh;
       };
-      const bgCtx = {
+      const bgCtx = Object.assign({
         THREE: T,
         size: 512,
         house, safe,
@@ -717,9 +732,18 @@ export function createPluginEngine(deps) {
         refresh: refreshOf(style),
         plane,
         planeSize: planeM,   // 默认平面边长（米）：画布 ↔ 米 的换算用得上
-      };
+      }, makeFieldApi(ha, dataObj));   // 背景 apply(ctx) 里也能 ctx.fieldState('weather')
       const ret = (typeof style.apply === 'function' ? style.apply(bgCtx) : null) || {};
       if (!ret.group) throw new Error('背景 apply 没有返回 { group }，引擎将清空背景');
+
+      /* onData 专属子树：挂到背景 group 下，重放时一起销毁重建。
+       * 与 styles[].apply 的时间通道 update(t, api) 各管各的子树，静态背景也会建。 */
+      let overlay = null;
+      if (dataFn && dataFields.length) {
+        overlay = new T.Group();
+        overlay.name = 'onData-overlay';
+        ret.group.add(overlay);
+      }
       /* 刷新率: 样式声明 refresh（Hz），apply 返回值可覆盖（与 home plugins.js 同口径）；0 = 静态 */
       const hz = refreshOf(ret.refresh != null ? ret : style);
       const upd = typeof ret.update === 'function' ? ret.update : null;
@@ -748,7 +772,16 @@ export function createPluginEngine(deps) {
         bgGroup: ret.group,    /* 预览层改 offsetX/offsetZ 时直接平移它，实时预览不重绘背景 */
         update: upd,           /* refresh>0 时由 tick() 按频率回调 update(t, api) */
         hz,                    /* 0 = 静态（不进调度，零每帧开销）；1..30 = 每秒回调这么多次 */
-        _bgApi: { group: ret.group, mesh: null, size: ret.size || 512 },
+        _bgApi: {
+          group: ret.group, mesh: null, size: ret.size || 512,
+          overlayGroup: overlay, options: bgOpts, ctx: bgCtx,
+        },
+        /* 顶层数据通道：notifyBackgroundData() 按实体状态快照去重后回调 */
+        _onData: dataFn,
+        _dataFields: dataFields,
+        _dataObj: dataObj,
+        _dataSnap: null,
+        _dataErrs: 0,
         dispose: () => {},
       };
     },
@@ -769,8 +802,9 @@ export function createPluginEngine(deps) {
       let inst;
       try {
         if (def.kind === 'background') {
-          /* 背景插件不走 model3d：直接调样式条目的 apply(ctx) 拿渲染好的 3D 内容 */
-          inst = this._spawnBackground(style, options, o);
+          /* 背景插件不走 model3d：直接调样式条目的 apply(ctx) 拿渲染好的 3D 内容。
+             顺带把 def / obj 交给它，用于顶层 onData 的实体绑定与字段声明。 */
+          inst = this._spawnBackground(style, options, Object.assign({}, o, { def, obj }));
         } else {
           inst = (def.model3d || def.create)(ctx);
         }
@@ -801,6 +835,10 @@ export function createPluginEngine(deps) {
           else api.update();
         } catch (e) { console.warn('[plugin:' + def.id + '] update 出错:', e); }
       }
+      /* 背景首帧强制补一次 onData（与 home 的 _startBackgroundData(..., true) 同口径）：
+       * 新实例 _dataSnap 本来就是 null，但显式 force 还能兜住「重放后状态值恰好没变」
+       * 的情况；mock 实体此时已 define，插件能拿到初值与回退值。 */
+      if (api._onData) this.notifyBackgroundData(true);
       onRender();
       return api;
     },
@@ -815,7 +853,37 @@ export function createPluginEngine(deps) {
           else it.update();
         } catch (e) { console.warn('[plugin:' + rec.def.id + '] update 出错:', e); }
       });
+      /* 同一批状态变化也要喂给背景的顶层 onData（设备实例级 update 与它互不影响） */
+      this.notifyBackgroundData();
       onRender();
+    },
+
+    /* 背景顶层 onData(fields, api)：实体状态 → 数据通道（与 home 的 PluginEngine.notifyBackgroundData 同口径）。
+     * 绑定值来自预览 obj[key]（_makeObj 按 fields 造 mock 实体，项目配置可覆盖），
+     * 每次状态变化对所有字段做值快照对比，只有真变了才回调；首帧 _dataSnap=null 必然触发一次。
+     * studio_set_entity / 面板点实体 → ha.emit → updateAll → 这里，开发期即可验证。 */
+    notifyBackgroundData(force) {
+      this.instances.forEach((rec) => {
+        const it = rec.inst;
+        if (rec.dead || !it || typeof it._onData !== 'function') return;
+        const obj = it._dataObj || {};
+        const vals = {};
+        let sig = '';
+        (it._dataFields || []).forEach((f) => {
+          const eid = String(obj[f.key] || '').trim();
+          const st = eid ? ha.getState(eid) : null;
+          const v = st ? { entity_id: eid, state: st.state, attributes: st.attributes || {} } : null;
+          vals[f.key] = v;
+          sig += '|' + f.key + '=' + (v ? JSON.stringify([v.state, v.attributes]) : '-');
+        });
+        if (!force && sig === it._dataSnap) return;
+        it._dataSnap = sig;
+        try { it._onData(vals, it._bgApi); }
+        catch (e) {
+          it._dataErrs = (it._dataErrs || 0) + 1;
+          if (it._dataErrs === 1) console.warn('[plugin:' + rec.def.id + '] 背景 onData 出错:', e);
+        }
+      });
     },
 
     /* 每帧驱动：插件动画 anim(dt) + 动态背景按各自 refresh(Hz) 节流回调 update(t, api)。

@@ -6,6 +6,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { modelUrl } from '../thumb';
 import { frameObject } from '../engine/frame';
+import { applyLegacyRenderer } from '../engine/three-legacy';
 
 const props = defineProps({ projId: String, file: String, node: { type: String, default: '' }, fixing: Boolean });
 const emit = defineEmits(['fix']);
@@ -19,11 +20,13 @@ let renderer = null, scene = null, camera = null, controls = null, current = nul
 function init() {
   const el = wrap.value;
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  applyLegacyRenderer(renderer);   // 与主视口 / home 同口径（见 engine/three-legacy.js）
   renderer.setPixelRatio(window.devicePixelRatio || 1);
   el.appendChild(renderer.domElement);
   scene = new THREE.Scene();
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4b2, 1.15));
-  const d = new THREE.DirectionalLight(0xffffff, 0.8);
+  /* 渲染器已是 legacy 灯光口径（×PI），这里按物理光原值 ÷PI 换算，观感不变 */
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4b2, 0.37));
+  const d = new THREE.DirectionalLight(0xffffff, 0.25);
   d.position.set(3, 5, 4);
   scene.add(d);
   camera = new THREE.PerspectiveCamera(40, 1, 0.001, 500);
