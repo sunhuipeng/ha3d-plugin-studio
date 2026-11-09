@@ -483,7 +483,7 @@ export const act = {
     st.options.push(o);
     scheduleSave();
   },
-  /* 背景插件：一键加上 ha-3d-home 插件引擎保留的偏移参数（与 home 的 K.offsetOpts() 定义保持一致，
+  /* 背景插件：一键加上 ha-3d-home 插件引擎保留的位置参数（与 home 的 K.positionOpts() 定义保持一致，
    * 见 ha-3d-home/public/js/plugins.js）。已有同名 key 的跳过，不重复添加。 */
   addOffsetOpts() {
     if (denyWhenLocked()) return;
@@ -492,6 +492,7 @@ export const act = {
     const defs = [
       { key: 'offsetX', label: '东西偏移', type: 'range', min: -30, max: 30, step: 0.5, def: 0, tip: '房屋在背景画面里东/西偏多少米（+西 = 往右拖背景左移，房屋相对偏东）' },
       { key: 'offsetZ', label: '南北偏移', type: 'range', min: -30, max: 30, step: 0.5, def: 0, tip: '房屋在背景画面里南/北偏多少米（+北 = 往右拖背景上移，房屋相对偏南）' },
+      { key: 'houseY', label: '离地高度', type: 'range', min: -10, max: 30, step: 0.5, def: 0, tip: '房屋地板相对背景基准面的高度（米）：正值=房屋悬空/建在山顶平台，负值=房屋在低洼/下沉庭院。插件从 ctx.options.houseY 读同一个值来画脚下地形' },
     ];
     const ps = (S.proj.styles || []).find((x) => x && x.id === st.id);
     if (ps && !Array.isArray(ps.options)) ps.options = [];
@@ -504,9 +505,9 @@ export const act = {
       st.options.push(copy);
       added++;
     });
-    if (!added) { toast('当前样式已包含偏移参数', true); return; }
+    if (!added) { toast('当前样式已包含位置参数', true); return; }
     scheduleSave();
-    toast('已添加偏移参数（offsetX / offsetZ）');
+    toast('已添加位置参数（offsetX / offsetZ / houseY）');
   },
   async importFile(file) {
     if (denyWhenLocked()) return;

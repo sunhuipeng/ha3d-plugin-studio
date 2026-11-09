@@ -240,13 +240,21 @@ export function createPluginEngine(deps) {
       repeatOpt(def) {
         return { key: 'repeat', label: '颗粒密度', type: 'range', min: 8, max: 40, step: 2, def };
       },
-      /* 背景整体偏移参数（引擎保留键 offsetX/offsetZ，米，默认 0 = 房屋落在背景中心） */
-      offsetOpts(range) {
+      /* 背景「位置参数」（三个引擎保留键，米）：offsetX / offsetZ 是水平偏移，
+       * houseY = 房屋地板相对背景基准面 y=0 的高度（正=悬空/山上，负=低洼/下沉）。
+       * 与 home 的 bgKit.positionOpts 同口径；defH 用于让插件声明平台的默认高度。 */
+      positionOpts(range, defH) {
         const m = range || 30;
+        const h = (typeof defH === 'number' && isFinite(defH)) ? defH : 0;
         return [
           { key: 'offsetX', label: '东西偏移', type: 'range', min: -m, max: m, step: 0.5, def: 0, tip: '房屋在背景画面里东/西偏多少米（+西 = 往右拖背景左移，房屋相对偏东）' },
           { key: 'offsetZ', label: '南北偏移', type: 'range', min: -m, max: m, step: 0.5, def: 0, tip: '房屋在背景画面里南/北偏多少米（+北 = 往右拖背景上移，房屋相对偏南）' },
+          { key: 'houseY', label: '离地高度', type: 'range', min: -10, max: 30, step: 0.5, def: h, tip: '房屋地板相对背景基准面的高度（米）：正值=房屋悬空/建在山顶平台，负值=房屋在低洼/下沉庭院。插件从 ctx.options.houseY 读同一个值来画脚下地形' },
         ];
+      },
+      /* 旧版两条水平偏移（保持兼容）：新写的背景插件请用 positionOpts() */
+      offsetOpts(range) {
+        return this.positionOpts(range).slice(0, 2);
       },
     },
 
@@ -653,10 +661,12 @@ export function createPluginEngine(deps) {
      * 连续 3 次异常自动停刷）；0/缺省 = 静态只画一次，不进调度。
      * 口径与 ha-3d-home 的 applyBackground 完全一致（原点 = 背景中心）：
      *   · ctx 里的 house / safe 都是「背景坐标系」—— 房屋可以不在画面正中
-     *   · studio 没有真实房屋，由「左下角卡片的安全范围（长×宽，米）」画一个半透明长方体占位，
-     *     盒子固定在世界原点（= 真实房屋在 home 里的位置），长 = safeW、宽 = safeD、高 8m
+     *   · studio 没有真实房屋，由「左下角卡片的安全范围（长×宽×高，米）」画一个半透明长方体占位，
+     *     盒子 X/Z 固定在世界原点（= 真实房屋在 home 里的位置），Y 抬到 houseY；高 = safeH
      *   · offsetX/offsetZ（保留键）：房屋相对背景中心的偏移（米）。先算进 house / safe，
      *     再据此把背景 group 摆到「房屋世界中心 − 偏移」，于是房子不动、背景绕着它偏
+     *   · houseY（保留键）：房屋地板高度（可为负）。引擎抬升占位盒、插件按同一个值画脚下地形；
+     *     safe 只额外添加 houseY/baseY/houseH/topY 四个数值，水平方向 forbidden/allowed 不变
      * home 侧同源实现：ha-3d-home / public/js/plugins.js → PluginEngine.applyBackground
      */
     _spawnBackground(style, options, o) {
@@ -670,15 +680,17 @@ export function createPluginEngine(deps) {
       const dataFields = (def && Array.isArray(def.fields)) ? def.fields.filter((f) => f && f.key) : [];
       const W = Math.min(100, Math.max(2, Number(o2.safeW) || 8));    /* 长（米，X 向） */
       const D = Math.min(100, Math.max(2, Number(o2.safeD) || 8));    /* 宽（米，Z 向） */
-      const H = 8;                                                    /* 占位高（米） */
+      const boxH = Math.min(100, Math.max(1, Number(o2.safeH) || 8)); /* 房屋占位高（米，左下角卡片可改） */
 
-      /* 背景参数（含引擎保留偏移键 offsetX / offsetZ，米）：
-       * = 房屋相对「背景中心」的偏移，0 = 房屋居中。
-       * 正值手感沿用「往右拖 = 背景往左/往上」：+X = 房屋偏东、+Z = 房屋偏南，钳 ±60。 */
+      /* 背景「位置参数」（三个引擎保留键，米）：offsetX / offsetZ 是水平偏移，
+       * houseY = 房屋地板相对背景基准面 y=0 的高度（正=悬空/山上，负=低洼/下沉）。
+       * 与 home applyBackground 同口径：引擎抬升房屋占位盒、插件按同一个值画脚下地形。 */
       const bgOpts = options || {};
       const clampOff = (v) => Math.max(-60, Math.min(60, Number(v) || 0));
+      const clampY = (v) => Math.max(-10, Math.min(30, Number(v) || 0));
       const offX = clampOff(bgOpts.offsetX);
       const offZ = clampOff(bgOpts.offsetZ);
+      let baseY = clampY(bgOpts.houseY);   // 权威源：样式参数 def（项目配置覆盖）
 
       /* house：背景坐标系里的房屋（cx/cy = 偏移量本身，不再是房屋世界中心） */
       const house = {
@@ -686,6 +698,7 @@ export function createPluginEngine(deps) {
         minY: -D / 2 + offZ, maxY: D / 2 + offZ,
         w: W, d: D,
         cx: offX, cy: offZ,
+        y: baseY, h: boxH, topY: baseY + boxH,   // 高度信息（纯数据，水平字段不变）
         floors: 1,
         hash: 'studio-' + W + 'x' + D + '@' + offX + ',' + offZ,
       };
@@ -696,6 +709,8 @@ export function createPluginEngine(deps) {
         inner: 1.5, outer: 45,
         x0: house.minX - 1.5, x1: house.maxX + 1.5,
         y0: house.minY - 1.5, y1: house.maxY + 1.5,
+        /* 只额外添加高度信息（纯数值）；水平方向的 forbidden/allowed 一字不动 */
+        houseY: baseY, baseY, houseH: boxH, topY: baseY + boxH,
         forbidden(x, z) { return x > safe.x0 && x < safe.x1 && z > safe.y0 && z < safe.y1; },
         allowed(x, z) {
           if (safe.forbidden(x, z)) return false;
@@ -707,7 +722,7 @@ export function createPluginEngine(deps) {
       const needHalf = Math.max(Math.abs(offX) + W / 2, Math.abs(offZ) + D / 2) + 4;
       const planeM = Math.max(120, needHalf * 2);
 
-      const plane = (src, sizeM) => {
+      const plane = (src, sizeM, hole) => {
         const tex = (src && src.isTexture) ? src : new T.CanvasTexture(src);
         /* 与 home 的 mkPlane 完全同口径：各向异性上限 4、受光 Lambert 材质。
          * 之前这里用的是 MeshBasic + anisotropy 8，虽然"不会被灯光洗白"，
@@ -715,10 +730,37 @@ export function createPluginEngine(deps) {
         tex.anisotropy = 4;
         tex.needsUpdate = true;
         const m = sizeM || planeM;
-        const mesh = new T.Mesh(
-          new T.PlaneGeometry(m, m),
-          new T.MeshLambertMaterial({ map: tex })
-        );
+        const mat = () => new T.MeshLambertMaterial({ map: tex });
+        /* houseY<0（低洼）时地面会盖住房屋：与 home 同口径，第三参 hole 挖矩形洞，
+         * 「回」字形四块平面共享同一张贴图、按整图 UV 取样。挖不挖交给插件。 */
+        if (hole && isFinite(hole.x0) && isFinite(hole.x1) && isFinite(hole.z0) && isFinite(hole.z1)) {
+          const half = m / 2;
+          const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, Number(v)));
+          const hx0 = cl(Math.min(hole.x0, hole.x1), -half, half);
+          const hx1 = cl(Math.max(hole.x0, hole.x1), -half, half);
+          const hz0 = cl(Math.min(hole.z0, hole.z1), -half, half);
+          const hz1 = cl(Math.max(hole.z0, hole.z1), -half, half);
+          const g = new T.Group();
+          g.name = 'background:plane-hole';
+          [[-half, half, -half, hz0], [-half, half, hz1, half],
+            [-half, hx0, hz0, hz1], [hx1, half, hz0, hz1]].forEach(([a, b, c, d]) => {
+            if (b - a <= 0.001 || d - c <= 0.001) return;
+            const geo = new T.PlaneGeometry(b - a, d - c);
+            const pos = geo.attributes.position, uv = geo.attributes.uv;
+            for (let i = 0; i < pos.count; i++) {
+              const wx = (a + b) / 2 + pos.getX(i);
+              const wz = (c + d) / 2 - pos.getY(i);
+              uv.setXY(i, (wx + half) / m, (half - wz) / m);
+            }
+            uv.needsUpdate = true;
+            const piece = new T.Mesh(geo, mat());
+            piece.rotation.x = -Math.PI / 2;
+            piece.position.set((a + b) / 2, -0.05, (c + d) / 2);
+            g.add(piece);
+          });
+          return g;
+        }
+        const mesh = new T.Mesh(new T.PlaneGeometry(m, m), mat());
         mesh.rotation.x = -Math.PI / 2;
         /* 平面中心 = 背景中心（原点），不是房屋中心：房屋按 house.cx/cy 偏到一边 */
         mesh.position.set(0, -0.05, 0);   // 压到地板下方一点，避免 z-fighting
@@ -729,12 +771,25 @@ export function createPluginEngine(deps) {
         size: 512,
         house, safe,
         options: bgOpts,
+        houseY: baseY,
         refresh: refreshOf(style),
         plane,
         planeSize: planeM,   // 默认平面边长（米）：画布 ↔ 米 的换算用得上
       }, makeFieldApi(ha, dataObj));   // 背景 apply(ctx) 里也能 ctx.fieldState('weather')
       const ret = (typeof style.apply === 'function' ? style.apply(bgCtx) : null) || {};
       if (!ret.group) throw new Error('背景 apply 没有返回 { group }，引擎将清空背景');
+
+      /* 兜底（同 home）：样式完全没声明 houseY 参数、但 apply 返回了它时，
+       * 回填 ctx/house/safe 的高度数值，保证 update/onData 与占位盒抬升读到同一个值。
+       * 声明过参数就以参数为准 —— ctx 在 apply 之前构造，返回值不能覆盖用户设的值。 */
+      const declaredH = (style.options || []).some((o) => o && o.key === 'houseY');
+      if (!declaredH && ret.houseY != null && isFinite(Number(ret.houseY))) {
+        baseY = clampY(ret.houseY);
+        bgOpts.houseY = baseY;
+        bgCtx.houseY = baseY;
+        house.y = baseY; house.h = boxH; house.topY = baseY + boxH;
+        safe.houseY = baseY; safe.baseY = baseY; safe.houseH = boxH; safe.topY = baseY + boxH;
+      }
 
       /* onData 专属子树：挂到背景 group 下，重放时一起销毁重建。
        * 与 styles[].apply 的时间通道 update(t, api) 各管各的子树，静态背景也会建。 */
@@ -754,15 +809,15 @@ export function createPluginEngine(deps) {
 
       /* 房屋占位：半透明长方体（长×宽 = 安全范围）。
        * 用单位几何 + scale —— 预览层改安全范围时直接改 scale 实时挪盒子，不用重跑 apply。
-       * 关键：盒子挂在 root 上（不随背景平移），永远钉在世界原点 ——
+       * 关键：盒子挂在 root 上（不随背景平移），X/Z 永远钉在世界原点 ——
        * 和 home 里「房子不动、背景偏移」同一套关系，插件按 house/safe 撒的点才对得上。 */
       const root = new T.Group();
       const box = new T.Mesh(
-        new T.BoxGeometry(1, H, 1),
+        new T.BoxGeometry(1, boxH, 1),
         new T.MeshLambertMaterial({ color: 0x9db8d9, transparent: true, opacity: 0.22, depthWrite: false })
       );
       box.scale.set(W, 1, D);
-      box.position.y = H / 2 + 0.02;    // 略高于底图，避免与贴图闪面
+      box.position.y = baseY + boxH / 2 + 0.02;   // 房屋基准高度 + 半个盒高
       root.add(box);
       root.add(ret.group);
 
@@ -770,6 +825,8 @@ export function createPluginEngine(deps) {
         group: root,
         safeBox: box,          /* 预览层改安全范围时直接 scale 它，实时预览不重绘背景 */
         bgGroup: ret.group,    /* 预览层改 offsetX/offsetZ 时直接平移它，实时预览不重绘背景 */
+        houseY: baseY,         /* 本次生效的房屋基准高度（供预览层实时抬盒） */
+        safeH: boxH,           /* 本次生效的房屋占位高度 */
         update: upd,           /* refresh>0 时由 tick() 按频率回调 update(t, api) */
         hz,                    /* 0 = 静态（不进调度，零每帧开销）；1..30 = 每秒回调这么多次 */
         _bgApi: {

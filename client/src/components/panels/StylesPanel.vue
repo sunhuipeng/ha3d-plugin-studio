@@ -7,7 +7,7 @@ import { optionOwns, stripExtraOptionKeys } from '../../option-schema';
 
 const st = computed(() => curStyle());
 
-/* 背景插件项目才有「添加偏移参数」按钮（offsetX/offsetZ 是 home 背景引擎的保留键） */
+/* 背景插件项目才有「添加位置参数」按钮（offsetX / offsetZ / houseY 是 home 背景引擎的保留键） */
 const isBgProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.kind === 'background'));
 
 /* 设备类插件项目（含门/窗）：只有它显示 离地 z / 标签高度（背景没有这两个概念） */
@@ -232,8 +232,8 @@ const LOCK = computed(() => S.lock.locked);
       </div>
       <el-button :disabled="LOCK" class="lock-block" @click="act.addOption">＋ 添加参数</el-button>
       <el-button :disabled="LOCK" v-if="isBgProj" type="primary" plain class="lock-block"
-        title="一键添加 ha-3d-home 背景引擎保留的 offsetX（东西偏移）/ offsetZ（南北偏移）两条滑条参数"
-        @click="act.addOffsetOpts">＋ 添加偏移参数</el-button>
+        title="一键添加 ha-3d-home 背景引擎保留的 offsetX（东西偏移）/ offsetZ（南北偏移）/ houseY（离地高度，可为负）三条滑条参数"
+        @click="act.addOffsetOpts">＋ 添加位置参数</el-button>
 
       <div class="del style-ops" style="margin-top: 12px;">
         <el-button :disabled="LOCK" type="primary" plain class="lock-block" @click="copyStyle">⧉ 复制当前样式</el-button>

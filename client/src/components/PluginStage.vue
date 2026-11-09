@@ -167,24 +167,31 @@ const styleParams = computed(() => {
 /* 还没填 key 的参数条数（卡片底部提示用） */
 const draftOptCount = computed(() => styleParams.value.filter((o) => !o.named).length);
 
-/* 背景插件的安全范围（长×宽 米）：占位长方体实时缩放，值持久化在项目 safeW/safeD */
-const safeSize = ref({ w: 8, d: 8 });
+/* 背景插件的安全范围（长×宽×高 米）：占位长方体实时缩放，值持久化在项目 safeW/safeD/safeH */
+const safeSize = ref({ w: 8, d: 8, h: 8 });
 let safeTimer = null;
-/* 从项目 JSON 回读（safeW/safeD 持久化在项目里，刷新后不丢） */
+/* 从项目 JSON 回读（safeW/safeD/safeH 持久化在项目里，刷新后不丢） */
 function loadSafeSize() {
   safeSize.value = {
     w: Number(S.proj && S.proj.safeW) || 8,
     d: Number(S.proj && S.proj.safeD) || 8,
+    h: Number(S.proj && S.proj.safeH) || 8,
   };
 }
-/* 实时预览：只 scale 占位长方体，不重跑 apply（背景不用重画） */
+/* 实时预览：只改占位长方体（长/宽/高 + 房屋基准高度），不重跑 apply */
 function applySafeOverlay() {
-  if (preview && preview.safeBox) preview.safeBox.scale.set(safeSize.value.w, 1, safeSize.value.d);
+  if (preview && preview.safeBox) {
+    const s = safeSize.value;
+    preview.setSafeSize(s.w, s.d, s.h);
+    const hy = optValue('houseY');       // 没声明该参数时不要覆盖 apply() 返回值兜底的高度
+    if (hy != null) preview.setHouseY(hy);
+  }
 }
 function setSafeSize(dim, v) {
   const n = Number(v);
   if (!isFinite(n)) return;
-  const c = Math.max(2, Math.min(100, n));   // 即时钳制：滚轮/输入不会把占位盒打成 0 或负数
+  const lo = dim === 'h' ? 1 : 2;
+  const c = Math.max(lo, Math.min(100, n));   // 即时钳制：滚轮/输入不会把占位盒打成 0 或负数
   safeSize.value = Object.assign({}, safeSize.value, { [dim]: c });
   /* 写进项目数据，完整重绘时的 saveNow() 会存进项目 JSON */
   if (S.proj) { S.proj['safe' + dim.toUpperCase()] = c; }
@@ -201,8 +208,9 @@ function commitSafe() {
   clearTimeout(safeTimer);
   const w = Math.min(100, Math.max(2, Math.round(Number(safeSize.value.w) || 8)));
   const d = Math.min(100, Math.max(2, Math.round(Number(safeSize.value.d) || 8)));
-  safeSize.value = { w, d };
-  if (S.proj) { S.proj.safeW = w; S.proj.safeD = d; }
+  const h = Math.min(100, Math.max(1, Math.round(Number(safeSize.value.h) || 8)));
+  safeSize.value = { w, d, h };
+  if (S.proj) { S.proj.safeW = w; S.proj.safeD = d; S.proj.safeH = h; }
   applySafeOverlay();
   refresh(view.value);
 }
@@ -215,12 +223,12 @@ async function syncHouseSize() {
   try {
     const res = await api('GET', '/api/home/house');
     const w = Math.round(Number(res && res.houseW) * 10) / 10;
-    const h = Math.round(Number(res && res.houseD) * 10) / 10;
-    if (!res || !res.ok || !(w > 0) || !(h > 0)) return;
-    if (Number(S.proj.safeW) === w && Number(S.proj.safeD) === h) { applySafeOverlay(); return; }
-    safeSize.value = { w, d: h };
+    const d = Math.round(Number(res && res.houseD) * 10) / 10;   // home 的「房屋深度」= 这里的安全范围宽
+    if (!res || !res.ok || !(w > 0) || !(d > 0)) return;
+    if (Number(S.proj.safeW) === w && Number(S.proj.safeD) === d) { applySafeOverlay(); return; }
+    safeSize.value = { w, d, h: safeSize.value.h };   // 高度是本地预览参数，别被户型同步覆盖
     S.proj.safeW = w;
-    S.proj.safeD = h;
+    S.proj.safeD = d;
     applySafeOverlay();
     refresh(view.value);
   } catch (e) { /* 静默：home 不可达不影响编辑 */ }
@@ -230,7 +238,7 @@ async function syncHouseSize() {
  * 取值来源：当前样式 options 的 def（引擎内存，AI 声明 + 存档恢复）。
  *   · 卡片里改值 → 写内存 def，respawn 快速生效，随自动保存全量落盘（原流程保留）；
  *   · 左侧「样式 / 字段」面板里的改动只存数据、不触发重渲 —— 改完点「重新渲染」看效果。
- * 背景的 offsetX/offsetZ 走「先平移 group 再软重渲」的快路径，其它参数统一 respawn。 */
+ * 背景的 offsetX/offsetZ/houseY 走「先平移背景 group / 抬降占位盒再软重渲」的快路径，其它参数统一 respawn。 */
 let bgOptTimer = null;
 let optsRetry = null;   // 预览忙时的补渲定时器：拖滑条会把多次重渲挤掉，最后一次不能丢
 
@@ -248,10 +256,13 @@ function setStyleOpt(o, v) {
   if (opt) { opt.def = v; scheduleSave(); }
   if (!o.key) return;
   clearTimeout(bgOptTimer);
-  if (isBg.value && (o.key === 'offsetX' || o.key === 'offsetZ')) {
-    /* 背景偏移滑条：先直接平移背景 group 拿即时反馈，再用缓存代码软重渲 ——
-     * 构图里的 house / safe 都带偏移，只有重画一次，撒点 / 马路才会跟着房屋一起挪 */
+  if (isBg.value && (o.key === 'offsetX' || o.key === 'offsetZ' || o.key === 'houseY')) {
+    /* 背景位置滑条：先直接平移背景 group / 抬降房屋占位盒拿即时反馈，
+     * 再用缓存代码软重渲 —— 构图里的 house / safe 都带这些值，只有重画一次，
+     * 撒点 / 平台 / 坑壁才会跟着房屋一起挪。 */
     preview.setBgOffset(optValue('offsetX'), optValue('offsetZ'));
+    const hy = optValue('houseY');
+    if (hy != null) preview.setHouseY(hy);
     bgOptTimer = setTimeout(() => { if (!disposed) refreshOpts(); }, 200);
   } else {
     /* 其它参数：用缓存的代码软重渲（不打服务端 /build），120ms 防抖 ≈ 实时 */
@@ -274,6 +285,7 @@ async function refreshOpts() {
       styleId: S.styleId,
       safeW: isBg.value ? safeSize.value.w : undefined,
       safeD: isBg.value ? safeSize.value.d : undefined,
+      safeH: isBg.value ? safeSize.value.h : undefined,
     });
     entities.value = preview.listEntities();
     S.previewStatus = st;
@@ -322,6 +334,7 @@ async function refresh(viewName, opts) {
       view: viewName || view.value,
       safeW: isBg.value ? safeSize.value.w : undefined,
       safeD: isBg.value ? safeSize.value.d : undefined,
+      safeH: isBg.value ? safeSize.value.h : undefined,
     });
     entities.value = preview.listEntities();
     S.previewStatus = st;
@@ -737,7 +750,7 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
     <!-- 安全范围（引擎画半透明占位长方体）——只有背景插件有「背景参数」这张卡 -->
     <div v-if="isBg" class="pv-entities">
       <div class="pv-ent-head">背景参数<span class="pv-ent-cur">{{ curStyleName }}</span></div>
-      <div class="pv-ent pv-ent-safe" title="安全范围（米）——引擎按此尺寸绘制半透明房屋占位长方体，范围内 safe 判定为不允许">
+      <div class="pv-ent pv-ent-safe" title="安全范围（米）——引擎按此尺寸绘制半透明房屋占位长方体，范围内 safe 判定为不允许；高度用于预览房屋下面可绘制的空间">
         <span class="pv-ent-name">范围</span>
         <span class="pv-safe-inputs">
           <label class="pv-safe-item">长<input class="pv-safe-num" type="number" min="2" max="100" step="1"
@@ -746,9 +759,12 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
           <label class="pv-safe-item">宽<input class="pv-safe-num" type="number" min="2" max="100" step="1"
             :value="safeSize.d" @input="setSafeSize('d', $event.target.value)"
             @wheel.prevent="wheelSafeSize('d', $event)" @blur="commitSafe">m</label>
+          <label class="pv-safe-item">高<input class="pv-safe-num" type="number" min="1" max="100" step="1"
+            :value="safeSize.h" @input="setSafeSize('h', $event.target.value)"
+            @wheel.prevent="wheelSafeSize('h', $event)" @blur="commitSafe">m</label>
         </span>
       </div>
-      <div class="pv-ent-tip">输入或滚轮实时预览占位范围；鼠标离开输入框后重绘背景并存入项目</div>
+      <div class="pv-ent-tip">长×宽×高实时预览占位盒；离地高度在「样式参数」里调，可为负（低洼）</div>
     </div>
     </div>
 

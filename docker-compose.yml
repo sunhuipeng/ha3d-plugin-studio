@@ -1,7 +1,9 @@
 services:
   ha3d-plugin-studio:
     build: .
-    # 构建镜像发布后可改为 image: your-registry/ha3d-plugin-studio:latest
+    # 用内网仓库镜像: 删掉上面的 build: .，把下面一行改成
+    # image: 192.168.31.16:4000/sunhuipeng/ha3d-plugin-studio:latest
+    # 然后 docker compose pull && docker compose up -d
     image: ha3d-plugin-studio:latest
     container_name: ha3d-plugin-studio
     restart: unless-stopped

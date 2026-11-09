@@ -45,6 +45,9 @@ export class PluginPreview {
     this.loading = false;
     this.lastLoadedAt = 0;
     this.safeBox = null;   /* 背景插件的房屋占位长方体（实时改 scale 用） */
+    this.houseY = 0;       /* 当前生效的房屋基准高度（样式参数 houseY，可为负） */
+    this.safeH = 8;        /* 当前生效的占位盒高度 */
+    this._boxBaseH = 8;    /* 占位盒几何自带的高度，改 safeH 时按比例 scale.y */
     /* 点击控制：设备/标签 → 按 click 配置切主实体状态 */
     this._clickRoot = null;      /* 当前设备 group（收集可点网格 + 标签锚点） */
     this._clickMeshes = [];      /* 参与射线拾取的网格 */
@@ -128,8 +131,10 @@ export class PluginPreview {
         try { this.ha.setState(p.entityId, p.state, p.attributes); } catch (e) { /* 忽略单条失败 */ }
       }
 
-      /* 4) 渲染（背景插件多带 safeW/safeD：房屋占位长×宽，米） */
-      const api = await this.engine.spawn(def, this.obj, { style, safeW: opts.safeW, safeD: opts.safeD });
+      /* 4) 渲染（背景插件多带安全范围：房屋占位长×宽×高，米） */
+      const api = await this.engine.spawn(def, this.obj, {
+        style, safeW: opts.safeW, safeD: opts.safeD, safeH: opts.safeH,
+      });
       if (api && api.stale) {
         /* 加载期间被下一次刷新取代，别把过期模型塞进场景 */
         this.loading = false;
@@ -144,6 +149,9 @@ export class PluginPreview {
          safeBox = 房屋占位长方体，左下角改安全范围时实时 scale 它 */
       this.safeBox = api.safeBox || null;
       this.bgGroup = api.bgGroup || null;   /* 背景本体 group：offsetX/offsetZ 实时平移用 */
+      this.houseY = Number(api.houseY) || 0;
+      this.safeH = Number(api.safeH) || 8;
+      this._boxBaseH = this.safeH;
       const isBg = def.kind === 'background';
       if (isBg) { this.host.setGrid(false); this.host.setAxes(false); }
       await this._frameWhenReady(opts.view || 'iso');
@@ -210,7 +218,7 @@ export class PluginPreview {
       });
 
       const api = await this.engine.spawn(this.def, this.obj, {
-        style, safeW: opts.safeW, safeD: opts.safeD,
+        style, safeW: opts.safeW, safeD: opts.safeD, safeH: opts.safeH,
       });
       if (api && api.stale) {
         this.loading = false;
@@ -221,6 +229,9 @@ export class PluginPreview {
       this._setupClick(this.def, api.group);
       this.safeBox = api.safeBox || null;
       this.bgGroup = api.bgGroup || null;
+      this.houseY = Number(api.houseY) || 0;
+      this.safeH = Number(api.safeH) || 8;
+      this._boxBaseH = this.safeH;
       if (this.def.kind === 'background') { this.host.setGrid(false); this.host.setAxes(false); }
       this.lastLoadedAt = Date.now();
       this.loading = false;
@@ -622,6 +633,28 @@ export class PluginPreview {
     const cx = Math.max(-60, Math.min(60, Number(x) || 0));
     const cz = Math.max(-60, Math.min(60, Number(z) || 0));
     this.bgGroup.position.set(-cx, 0, -cz);
+    return true;
+  }
+
+  /* 实时预览：房屋基准高度 houseY（值为负 = 低洼）。只挪占位盒，不动背景 group；
+   * 停手后 PluginStage 会软重渲一次，让插件按新的高度重画平台 / 坑壁。
+   * 与 home 的 View3D.setHouseY 同口径（那边挪的是真实房屋 root）。 */
+  setHouseY(y) {
+    if (!this.safeBox) return false;
+    this.houseY = Math.max(-10, Math.min(30, Number(y) || 0));
+    this.safeBox.position.y = this.houseY + this.safeH / 2 + 0.02;
+    return true;
+  }
+
+  /* 实时预览：安全范围长×宽×高（米）。盒子几何高度是 _boxBaseH，用 scale.y 按比例改；
+   * 盒底始终落在 houseY 上，所以改高度时 position.y 也要跟着重算。 */
+  setSafeSize(w, d, h) {
+    if (!this.safeBox) return false;
+    const W = Math.max(2, Math.min(100, Number(w) || 8));
+    const D = Math.max(2, Math.min(100, Number(d) || 8));
+    this.safeH = Math.max(1, Math.min(100, Number(h) || 8));
+    this.safeBox.scale.set(W, this.safeH / (this._boxBaseH || 8), D);
+    this.safeBox.position.y = this.houseY + this.safeH / 2 + 0.02;
     return true;
   }
 }

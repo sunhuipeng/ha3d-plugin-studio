@@ -1313,14 +1313,14 @@ textarea:not([class]) {
   min-width: 46px;
 }
 .pv-ent-val:hover { border-color: var(--accent); color: var(--accent); }
-/* 背景参数：安全范围 长/宽 数字输入（支持滚轮快速调整） */
-.pv-safe-inputs { display: inline-flex; align-items: center; gap: 8px; }
+/* 背景参数：安全范围 长/宽/高 数字输入（支持滚轮快速调整） */
+.pv-safe-inputs { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .pv-safe-item {
-  display: inline-flex; align-items: center; gap: 3px;
+  display: inline-flex; align-items: center; gap: 2px;
   font-size: 11px; color: var(--fg-dim);
 }
 .pv-safe-num {
-  width: 52px;
+  width: 44px;
   border: 1px solid var(--line);
   background: #eef4ff;
   color: #2f6bbf;

@@ -192,14 +192,28 @@ docker compose up -d --build
 
 容器内访问宿主机上的 ha-3d-home 发布：Mac/Windows 填 `http://host.docker.internal:8099`，Linux 填宿主机内网 IP。
 
-**离线打包**（无镜像仓库的机器，同 ha-3d-home 的 `pack:image` 体系）：
+**推送到内网仓库**（默认只推 `linux/arm64`，同 ha-3d-home 的 `push:image` 体系）：
+
+每次执行先把 `package.json` 的 `version` 递增一位（默认 patch，`1.0.0 → 1.0.1`），
+然后只推两个 tag：
+
+- `192.168.31.16:4000/sunhuipeng/ha3d-plugin-studio:<version>`（版本固定）
+- `192.168.31.16:4000/sunhuipeng/ha3d-plugin-studio:latest`（始终最新，必推）
 
 ```bash
-npm run pack:image           # 本机架构 → dist/ha3d-plugin-studio-latest-<arch>.tar
-npm run pack:image:amd64     # Apple Silicon 给 x86 服务器打包（显式指定平台）
-npm run pack:image:arm64     # 给 ARM 服务器 / NAS 打包
-# 目标机: docker load -i <tar> → 按 compose 方式起容器
+npm run push:image                # 自动升版 + 只推上面 2 个 tag
+npm run push:image:arm64          # 显式平台，等价
+BUMP=none npm run push:image      # 不升版，沿用当前 version 重推
+BUMP=minor npm run push:image     # 升 minor
+VERSION=2.0.0 npm run push:image  # 手动指定版本号（不自动升版）
 ```
+
+前置条件：内网仓库是 **HTTP**，Docker 需把 `192.168.31.16:4000` 加进 `insecure-registries`
+（Docker Desktop / OrbStack → Settings → Docker Engine → 重启）；首次推送先 `docker login 192.168.31.16:4000`。
+目标机 `docker pull 192.168.31.16:4000/sunhuipeng/ha3d-plugin-studio:latest`，
+或把 `docker-compose.yml` 的 `build: .` 删掉、`image:` 换成完整地址后 `docker compose up -d`。
+x86 目标机不适用 arm64 镜像，需要时显式 `bash scripts/push-image.sh linux/amd64` 单独推。
+不带登录态直接 `curl .../tags/list` 会返回 401，确认上传用 `docker pull` 或仓库页面。
 
 
 ## 项目结构
@@ -225,7 +239,7 @@ client/src/        前端（Vue3 + Vite）
 data/
   projects/<id>/   每个插件项目：project.json + models/*.glb + preview.png
   config.json      远程发布目标（host + key）
-scripts/           mcp-smoke 冒烟测试 + pack-image.sh 离线镜像打包
+scripts/           push-image.sh 镜像构建推送
 Dockerfile         多阶段构建：镜像内构建前端 → 轻量运行层（数据走 /data 卷）
 docker-compose.yml 单容器部署（8098 端口 + /data 挂载 + healthcheck）
 ```
