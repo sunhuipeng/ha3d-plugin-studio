@@ -2,7 +2,8 @@
 /* 左侧竖排操作栏: 图标+文字+快捷键，分组排列，点击或按快捷键开关对应浮层面板 */
 import { onMounted, onBeforeUnmount } from 'vue';
 import { Operation, Box, Brush, PriceTag, Document, EditPen } from '@element-plus/icons-vue';
-import { S } from '../store';
+import { useStudio } from '../stores';
+const { ui } = useStudio();
 
 const groups = [
   [{ id: 'settings', label: '属性', icon: Operation, key: 'A' },
@@ -18,7 +19,7 @@ const groups = [
 
 const KEY_MAP = Object.fromEntries(groups.flat().map((it) => [it.key, it]));
 
-function toggle(id) { S.panel = S.panel === id ? null : id; }
+function toggle(id) { ui.togglePanel(id); }
 
 /* 点击浮层外的区域 → 关闭浮层（图标栏的激活态同源，一起取消）。
    Element Plus 的下拉/弹窗都 teleport 到 body，命中了要放行，否则会被误判成「外部」。 */
@@ -28,11 +29,11 @@ const KEEP = [
 ].join(',');
 
 function onDocDown(e) {
-  if (!S.panel) return;
+  if (!ui.panel) return;
   const t = e.target;
   if (t && t.closest && t.closest(KEEP)) return;
-  S.panel = null;
-  S.previewFile = '';
+  ui.setPanel(null);
+  ui.clearPreview();
 }
 
 function onKeydown(e) {
@@ -43,8 +44,8 @@ function onKeydown(e) {
   if (it) { e.preventDefault(); toggle(it.id); }
   else if (e.key === 'Escape') {
     /* 先取消模型预览高亮，都没有时再关闭整个浮层 */
-    if (S.previewFile) S.previewFile = '';
-    else if (S.panel) S.panel = null;
+    if (ui.previewFile) ui.clearPreview();
+    else if (ui.panel) ui.setPanel(null);
   }
 }
 
@@ -63,7 +64,7 @@ onBeforeUnmount(() => {
   <nav id="rail">
     <template v-for="(g, gi) in groups" :key="gi">
       <div v-if="gi" class="rail-sep"></div>
-      <button v-for="it in g" :key="it.id" class="rail-item" :class="{ on: S.panel === it.id }"
+      <button v-for="it in g" :key="it.id" class="rail-item" :class="{ on: ui.panel === it.id }"
         :title="it.label + '（快捷键 ' + it.key + '）'" @click="toggle(it.id)">
         <span class="rail-icon">
           <el-icon :size="18"><component :is="it.icon" /></el-icon>

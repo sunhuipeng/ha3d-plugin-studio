@@ -6,7 +6,8 @@
  * 静态绘制：渲染出插件、实体状态变化、样式参数切换时才重画一次，没有逐帧动画。
  */
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
-import { S, viewportApi } from '../store';
+import { useStudio } from '../stores';
+const { S, viewportApi, ui } = useStudio();
 import { drawPlan, drawPlanEmpty } from '../engine/plan-draw';
 
 const cv = ref(null);
@@ -65,7 +66,7 @@ onBeforeUnmount(() => {
 });
 
 /* 每次「运行 / 重建预览 / 改实体」都会刷新 previewStatus → 重画 */
-watch(() => S.previewStatus, () => schedule());
+watch(() => ui.previewStatus, () => schedule());
 watch(() => S.styleId, () => schedule());
 </script>
 

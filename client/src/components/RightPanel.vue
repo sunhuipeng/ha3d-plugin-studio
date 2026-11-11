@@ -1,7 +1,8 @@
 <script setup>
 /* 浮层容器：只负责浮层外壳（定位 / 宽度 / 动画），内容按 tab 拆到 panels/*.vue */
 import { computed, watch } from 'vue';
-import { S, act, toast } from '../store';
+import { useStudio } from '../stores';
+const { S, toast, ui } = useStudio();
 import SettingsPanel from './panels/SettingsPanel.vue';
 import PartsPanel from './panels/PartsPanel.vue';
 import StylesPanel from './panels/StylesPanel.vue';
@@ -11,7 +12,7 @@ import PromptPanel from './panels/PromptPanel.vue';
 
 /* 各 tab 浮层独立宽度（px） */
 const PANEL_W = { settings: 400, parts: 480, styles: 520, fields: 480, code: 820, prompt: 580 };
-const panelWidth = computed(() => (PANEL_W[S.panel] || 400) + 'px');
+const panelWidth = computed(() => (PANEL_W[ui.panel] || 400) + 'px');
 
 const PANELS = {
   settings: SettingsPanel,
@@ -21,16 +22,17 @@ const PANELS = {
   fields: FieldsPanel,
   code: CodePanel,
 };
-const current = computed(() => PANELS[S.panel] || null);
+const current = computed(() => PANELS[ui.panel] || null);
 
 /* 字段 / 样式两个 tab 顶部的协同说明：配置是「人机共用」的 */
-const showCfgNote = computed(() => S.panel === 'styles' || S.panel === 'fields');
+const showCfgNote = computed(() => ui.panel === 'styles' || ui.panel === 'fields');
 
-/* 配置锁：锁定后左侧所有浮层只读（纯前端状态，刷新页面即解锁） */
-const locked = computed(() => S.lock.locked);
-const lockOwner = computed(() => (S.lock.by === 'mcp' ? 'AI' : '你'));
+/* 配置锁：锁定后左侧所有浮层只读（纯前端状态，刷新页面即解锁）。
+ * isLocked / lockByText 是 ui store 的 getter，解锁直接调它的 Action。 */
+const locked = computed(() => ui.isLocked);
+const lockOwner = computed(() => ui.lockByText);
 function unlock() {
-  act.setLock(false).catch((e) => toast(e.message, true));
+  ui.setLock(false).catch((e) => toast(e.message, true));
 }
 
 /* 锁定 = 面板里的每个控件自己 disabled（各 panel 里 `:disabled="LOCK"`）。
@@ -46,13 +48,13 @@ watch(locked, (v) => {
 
 <template>
   <transition name="fp">
-    <aside id="float-panel" v-if="S.panel && S.proj" :style="{ width: panelWidth }">
+    <aside id="float-panel" v-if="ui.panel && S.proj" :style="{ width: panelWidth }">
       <div class="fp-body" :class="{ locked }">
         <!-- 配置锁：只读提示条（锁定期间面板内所有控件不响应，查看 / 滚动正常） -->
         <div v-if="locked" class="lock-note">
           <span class="lock-note-title">配置已锁定 · 只读</span>
           <span class="lock-note-text">
-            由{{ lockOwner }}锁定，避免人和 AI 同时改配置互相覆盖<template v-if="S.lock.note">（{{ S.lock.note }}）</template>。
+            由{{ lockOwner }}锁定，避免人和 AI 同时改配置互相覆盖<template v-if="ui.lock.note">（{{ ui.lock.note }}）</template>。
             需要手动编辑请先解锁；刷新页面也会自动解锁。
           </span>
           <button class="lock-note-btn" @click="unlock">解锁</button>

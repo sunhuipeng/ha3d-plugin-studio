@@ -1,11 +1,12 @@
 <script setup>
 /* 面板：部件（模型文件库 / 大图预览 / GLB 节点拆分）
  *
- * 模型文件以 models 目录为唯一来源（S.models），项目 JSON 里不保存 parts：
+ * 模型文件以 models 目录为唯一来源（assets.models），项目 JSON 里不保存 parts：
  * 模型怎么摆由插件代码决定（ctx.frame / ctx.glb('models/x.glb') / ctx.box …）。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
-import { S, act } from '../../store';
+import { useStudio } from '../../stores';
+const { S, act, ui, assets } = useStudio();
 import PartThumb from '../PartThumb.vue';
 import ModelPreview from '../ModelPreview.vue';
 import { modelNodes, cachedNodes, isNodesError } from '../../thumb';
@@ -38,16 +39,16 @@ onBeforeUnmount(() => window.removeEventListener('part-nodes', onNodesEvent));
 
 /* 文件库：点击行高亮 + 顶部预览；点子节点 = 预览该子模型 */
 function onLibClick(f) {
-  S.previewFile = f;
-  S.previewNode = '';
+  ui.setPreviewFile(f);
+  ui.setPreviewNode('');
 }
 function onLibNodeClick(f, name) {
-  S.previewFile = f;
-  S.previewNode = name;
+  ui.setPreviewFile(f);
+  ui.setPreviewNode(name);
 }
 
 /* 预览目标：最近点击的库文件；无点击时预览框显示「未选择模型」 */
-const previewFile = computed(() => S.previewFile || '');
+const previewFile = computed(() => ui.previewFile || '');
 const previewName = computed(() => previewFile.value.replace(/\.glb$/i, ''));
 
 /* 文件选择（隐藏 input + el-button 触发） */
@@ -66,13 +67,13 @@ async function confirmDelModel(f) {
 }
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
-const LOCK = computed(() => S.lock.locked);
+const LOCK = computed(() => ui.isLocked);
 </script>
 
 <template>
   <section class="tabpage parts-page">
     <!-- 大图模型预览 + 信息 -->
-    <ModelPreview :proj-id="S.proj.id" :file="previewFile" :node="S.previewNode" :fixing="S.fixing"
+    <ModelPreview :proj-id="S.proj.id" :file="previewFile" :node="ui.previewNode" :fixing="assets.fixing"
       @fix="act.fixMaterial(previewFile)" />
     <div v-if="previewFile" class="mp-info">
       <b>{{ previewName }}</b>
@@ -82,9 +83,9 @@ const LOCK = computed(() => S.lock.locked);
 
     <!-- 模型文件库（唯一列表：项目里的模型都在这儿，插件代码按 models/文件名 引用） -->
     <div class="parts-scroll">
-      <div class="blk-title">模型文件库（{{ S.models.length }} 个；代码里用 ctx.glb('models/文件名') 引用）</div>
+      <div class="blk-title">模型文件库（{{ assets.models.length }} 个；代码里用 ctx.glb('models/文件名') 引用）</div>
       <ul class="list parts-ul">
-        <li v-for="f in S.models" :key="f"
+        <li v-for="f in assets.models" :key="f"
           :class="{ pv: previewFile === f, expanded: expandedFiles.has(f) }"
           @click="onLibClick(f)">
           <PartThumb :proj-id="S.proj.id" :file="f" />
@@ -110,7 +111,7 @@ const LOCK = computed(() => S.lock.locked);
           <!-- 嵌套子列表：GLB 内节点树，点击预览子模型，✂ 可把某节点导出成独立 .glb -->
           <ul v-if="expandedFiles.has(f) && nodesOf(f)" class="p-nodes">
             <li v-for="(n, i) in flatNodes(nodesOf(f))" :key="i" class="p-node"
-              :class="{ sel: S.previewNode === n.name && S.previewFile === f }"
+              :class="{ sel: ui.previewNode === n.name && ui.previewFile === f }"
               :style="{ paddingLeft: 6 + n.depth * 14 + 'px' }"
               :title="'点击预览该子模型'"
               @click.stop="onLibNodeClick(f, n.name)">
@@ -129,7 +130,7 @@ const LOCK = computed(() => S.lock.locked);
           <div v-else-if="expandedFiles.has(f) && isNodesError(f)" class="p-nodes p-node-err">⚠ 节点解析失败</div>
         </li>
       </ul>
-      <div v-if="!S.models.length" class="hint">模型文件库为空。保持为空也没问题——纯代码建模即可；需要更精致的造型时，再用下方按钮导入 GLB。</div>
+      <div v-if="!assets.models.length" class="hint">模型文件库为空。保持为空也没问题——纯代码建模即可；需要更精致的造型时，再用下方按钮导入 GLB。</div>
     </div>
 
     <!-- 固定在面板最底部：说明 + 导入入口始终可见，不随模型列表滚动 -->

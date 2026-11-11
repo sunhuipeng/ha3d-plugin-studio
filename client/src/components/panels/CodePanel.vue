@@ -9,7 +9,8 @@ import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState, Compartment } from '@codemirror/state';
 import { javascript } from '@codemirror/lang-javascript';
-import { S, api, saveNow, scheduleSave, viewportApi, toast } from '../../store';
+import { useStudio } from '../../stores';
+const { S, api, saveNow, scheduleSave, viewportApi, toast, ui } = useStudio();
 
 const host = ref(null);
 const code = ref('');
@@ -27,8 +28,8 @@ let applying = false;       // 程序化写入文档期间，别把内容当用�
 /* 配置锁：锁定期间代码只读（仍可选中 / 复制，只是不能改） */
 const editable = new Compartment();
 const lockExt = () => [
-  EditorView.editable.of(!S.lock.locked),
-  EditorState.readOnly.of(S.lock.locked),
+  EditorView.editable.of(!ui.isLocked),
+  EditorState.readOnly.of(ui.isLocked),
 ];
 
 /* VSCode 浅色观感（只覆盖外观，不改行为） */
@@ -94,7 +95,7 @@ function applyDoc() {
 /* 用户在编辑器里打字 → 同步到项目数据 + 自动保存 */
 function onDocChange() {
   if (!view || applying) return;
-  if (S.lock.locked) return;   // 锁定期间不改数据（编辑器本身已 readOnly，这里兜底）
+  if (ui.isLocked) return;   // 锁定期间不改数据（编辑器本身已 readOnly，这里兜底）
   const txt = view.state.doc.toString();
   code.value = txt;
   lineCount.value = txt ? txt.split('\n').length : 0;
@@ -108,25 +109,25 @@ function onDocChange() {
    组件随即卸载，之后只能靠全局状态和 toast 反馈结果。 */
 async function run() {
   if (!S.proj || running.value) return;
-  if (S.lock.locked) { toast('配置已锁定：解锁后才能运行', true); return; }
+  if (ui.isLocked) { toast('配置已锁定：解锁后才能运行', true); return; }
   const pv = viewportApi.pluginPreview;
   if (!pv) { toast('渲染区还没就绪，稍等一下再试', true); return; }
   running.value = true;
   err.value = '';
 
   const edited = code.value;
-  S.panel = null;
+  ui.setPanel(null);
 
   try {
     await saveNow();
     const st = await pv.refresh();
     const bad = (st && st.ok === false && st.error)
-      || (!st && S.previewStatus && S.previewStatus.ok === false && S.previewStatus.error)
+      || (!st && ui.previewStatus && ui.previewStatus.ok === false && ui.previewStatus.error)
       || '';
     if (bad) {
       toast('运行失败：' + bad, true);
       /* 失败时把面板叫回来，方便接着改（用户已经切到别的 tab 就不抢） */
-      if (!S.panel) S.panel = 'code';
+      if (!ui.panel) ui.setPanel('code');
       return;
     }
     synced = edited;
@@ -136,7 +137,7 @@ async function run() {
     const msg = e.message || String(e);
     err.value = msg;
     toast('运行失败：' + msg, true);
-    if (!S.panel) S.panel = 'code';
+    if (!ui.panel) ui.setPanel('code');
   } finally {
     running.value = false;
   }
@@ -168,7 +169,7 @@ watch(() => S.proj && S.proj.id, load);
 /* 切样式不重拉：plugin.js 不随样式变化（styles 由 project-config 在运行时注入），重拉只会打断编辑 */
 /* 外部改了代码（MCP 写回 / 别的 tab 改配置）→ 重取；内容与编辑器一致就别动，避免打断输入 */
 /* 配置锁变化 → 编辑器可编辑性跟着切（内容不动，选中 / 滚动 / 复制不受影响） */
-watch(() => S.lock.locked, (v) => {
+watch(() => ui.isLocked, (v) => {
   if (!view) return;
   view.dispatch({ effects: editable.reconfigure([EditorView.editable.of(!v), EditorState.readOnly.of(v)]) });
 });
@@ -186,7 +187,7 @@ watch(() => S.proj && S.proj.customJs, (v) => {
       <span class="code-meta">{{ lineCount }} 行<span v-if="manifest"> · v{{ manifest.version }} · {{ manifest.kind }}<template v-if="manifest.type">/{{ manifest.type }}</template></span></span>
       <span v-if="stale" class="code-badge stale">未运行</span>
       <span class="spacer"></span>
-      <button class="code-btn run" :disabled="S.lock.locked || running || loading" title="保存并按最新代码重建渲染（⌘/Ctrl + Enter）" @click="run">{{ running ? '运行中…' : '运行 ▶' }}</button>
+      <button class="code-btn run" :disabled="ui.isLocked || running || loading" title="保存并按最新代码重建渲染（⌘/Ctrl + Enter）" @click="run">{{ running ? '运行中…' : '运行 ▶' }}</button>
     </div>
 
     <div v-if="err" class="code-err">{{ err }}</div>
@@ -197,7 +198,7 @@ watch(() => S.proj && S.proj.customJs, (v) => {
     <div ref="host" class="code-cm"></div>
 
     <div class="code-foot">
-      <template v-if="S.lock.locked">配置已锁定：只读查看（可选中复制），解锁后才能编辑。</template>
+      <template v-if="ui.isLocked">配置已锁定：只读查看（可选中复制），解锁后才能编辑。</template>
       <template v-else>可直接编辑，改动自动保存；⌘/Ctrl + Enter 或点「运行 ▶」重建渲染。</template>
     </div>
   </section>

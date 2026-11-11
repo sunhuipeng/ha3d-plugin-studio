@@ -6,7 +6,8 @@
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Plus, Setting, Upload } from '@element-plus/icons-vue';
-import { S, act } from '../store';
+import { useStudio } from '../stores';
+const { act, project, ui } = useStudio();
 
 /* ---- 新建项目（虚线卡片 → 弹窗：先选类型 kind，再填名称） ----
  * kind 在建项目时定死，之后不可改 —— 两类的数据结构与编辑页完全不同：
@@ -151,8 +152,8 @@ const settingVisible = ref(false);
 const hostInput = ref('');
 const keyInput = ref('');
 function openSetting() {
-  hostInput.value = S.target ? S.target.host : '';
-  keyInput.value = S.target ? S.target.key : '';
+  hostInput.value = project.target ? project.target.host : '';
+  keyInput.value = project.target ? project.target.key : '';
   settingVisible.value = true;
 }
 async function doSaveTarget() {
@@ -200,7 +201,7 @@ function kindLabel(p) {
 
         <div class="cards">
           <!-- 项目卡片: 渲染图 + 信息区（名称 / id / 更新时间 / 操作） -->
-          <div v-for="p in S.projects" :key="p.id" class="card" @click="act.openProject(p.id)">
+          <div v-for="p in project.projects" :key="p.id" class="card" @click="act.openProject(p.id)">
             <!-- 渲染的模型（编辑页落盘的快照；没打开过 → 白底网格占位） -->
             <div class="card-view">
               <img v-if="!pvMissing[p.id]" :src="pvUrl(p)" alt="" @error="pvMissing[p.id] = true">
@@ -233,7 +234,7 @@ function kindLabel(p) {
           </div>
         </div>
 
-        <div v-if="!S.projects.length" class="empty hint">
+        <div v-if="!project.projects.length" class="empty hint">
           还没有项目，点击上方虚线框新建一个
         </div>
       </div>
@@ -332,7 +333,7 @@ function kindLabel(p) {
             <template #prepend>密钥</template>
           </el-input>
           <p class="hint" style="margin-top: 8px">
-            当前: {{ S.target ? S.target.host : '加载中…' }}。<br>
+            当前: {{ project.target ? project.target.host : '加载中…' }}。<br>
             发布插件时会把 plugin.json / plugin.js / models 打包成 zip，调用 ha-3d-home 的安装接口远程安装到该主机（需 ha-3d-home 侧提供安装接口）。
           </p>
         </el-tab-pane>

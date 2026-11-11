@@ -12,12 +12,13 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { S, act, scheduleSave, toast, viewportApi } from '../store';
+import { useStudio } from '../stores';
+const { S, act, scheduleSave, toast, viewportApi, project, assets } = useStudio();
 import { prettyName } from '../catalog';
 import { ThreeHost } from '../engine/three-host';
 
 const items = computed(() => (S.proj && S.proj.catalog && S.proj.catalog.items) || []);
-const types = computed(() => (S.catalogTypes && S.catalogTypes.length ? S.catalogTypes : []));
+const types = computed(() => (assets.catalogTypes && assets.catalogTypes.length ? assets.catalogTypes : []));
 function typeName(t) {
   const hit = types.value.find((x) => x.type === t);
   return hit ? (hit.name || hit.type) : (t || '其他');
@@ -140,7 +141,7 @@ watch(selId, () => { if (!selecting) loadSel(); });
  * 服务端落盘后 ws 推 catalog 刷新，store 覆盖内存清单并 +catalogEpoch。
  * 选中项若还在、但对象被整条替换，watch(selId) 不会触发，必须在这里手动重载 3D 预览；
  * 选中项被删了就切到第一件（切换会触发 watch(selId)，不用重复 loadSel）。 */
-watch(() => S.catalogEpoch, () => {
+watch(() => project.catalogEpoch, () => {
   const list = items.value;
   if (!list.some((x) => x && x.id === selId.value)) {
     selId.value = list.length ? list[0].id : '';
@@ -191,7 +192,7 @@ function safeGlbName(name) {
   const base = String(name || '').replace(/\.glb$/i, '');
   let s = base.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[^A-Za-z0-9]+/, '').slice(0, 40);
   if (!s) s = 'model_' + Date.now().toString(36);
-  const taken = new Set((S.models || []).map((m) => String(m).toLowerCase()));
+  const taken = new Set((assets.models || []).map((m) => String(m).toLowerCase()));
   let out = s + '.glb';
   for (let i = 2; taken.has(out.toLowerCase()); i++) out = s + '_' + i + '.glb';
   return out;
@@ -265,7 +266,7 @@ async function measureSel() {
 /* 导入过但没被任何家具引用的模型（列表底部提示，避免「模型白传了」） */
 const unusedModels = computed(() => {
   const used = new Set(items.value.map((x) => x.model).filter(Boolean));
-  return (S.models || []).filter((m) => !used.has(m));
+  return (assets.models || []).filter((m) => !used.has(m));
 });
 
 /* ---------------- 导出 / 发布 / 返回 ---------------- */
@@ -395,7 +396,7 @@ async function doPublish(bump) {
               <el-option v-for="t in types" :key="t.type" :label="t.name + '（' + t.type + '）'" :value="t.type" />
             </el-select>
           </label>
-          <p class="hint">分类决定它在 home 家具库进哪个页签；选项来自 home 的 /api/catalog{{ S.catalogTypesSource === 'home' ? '（已连接）' : '（未连上，用本地兜底表）' }}</p>
+          <p class="hint">分类决定它在 home 家具库进哪个页签；选项来自 home 的 /api/catalog{{ assets.catalogTypesSource === 'home' ? '（已连接）' : '（未连上，用本地兜底表）' }}</p>
 
           <div class="size-head">
             <span>尺寸（米）</span>

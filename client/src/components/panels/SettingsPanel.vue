@@ -5,7 +5,8 @@
  * 家具项目（kind:'catalog'）走独立的家具编辑页（components/CatalogEditor.vue）。
  * kind 在新建项目时确定，本面板只读展示。 */
 import { computed } from 'vue';
-import { S, scheduleSave, MODEL_TYPES, isWallType } from '../../store';
+import { useStudio } from '../../stores';
+const { S, scheduleSave, MODEL_TYPES, isWallType, ui } = useStudio();
 
 const typeOptions = computed(() => {
   const k = S.proj?.plugin.kind;
@@ -35,7 +36,7 @@ const projName = computed({
 });
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
-const LOCK = computed(() => S.lock.locked);
+const LOCK = computed(() => ui.isLocked);
 </script>
 
 <template>

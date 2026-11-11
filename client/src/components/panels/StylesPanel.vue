@@ -2,10 +2,11 @@
 /* 面板：当前样式（基本信息 + 样式级参数 options + 复制/删除样式） */
 import { computed, ref, watch } from 'vue';
 import { ElMessageBox } from 'element-plus';
-import { S, act, scheduleSave, toast, OPTION_TYPES, curStyle, engineList } from '../../store';
+import { useStudio } from '../../stores';
+const { S, act, scheduleSave, toast, OPTION_TYPES, project, ui } = useStudio();
 import { optionOwns, stripExtraOptionKeys } from '../../option-schema';
 
-const st = computed(() => curStyle());
+const st = computed(() => project.curStyle);
 
 /* 背景插件项目才有「添加位置参数」按钮（offsetX / offsetZ / houseY 是 home 背景引擎的保留键） */
 const isBgProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.kind === 'background'));
@@ -21,9 +22,9 @@ const draftKeys = computed(() => ((st.value && st.value.options) || [])
   .filter((o) => o && !String(o.key || '').trim()).length);
 
 /* 样式 id 不能直接 v-model 到 st.id：
-   curStyle() 是按 S.styleId 去 styles 里 find 的，边打字边改 id 会让 S.styleId 找不到它，
+   project.curStyle 是按 project.styleId 去 styles 里 find 的，边打字边改 id 会让 project.styleId 找不到它，
    面板就回落到 styles[0]（表现为「在第二个样式里输入，字跑到第一个样式去」）。
-   所以这里用本地草稿，失焦 / 回车时才一次性提交，并在提交时同步 S.styleId。 */
+   所以这里用本地草稿，失焦 / 回车时才一次性提交，并在提交时同步 project.styleId。 */
 const idDraft = ref('');
 watch(() => (st.value ? st.value.id : ''), (v) => { idDraft.value = v || ''; }, { immediate: true });
 
@@ -34,7 +35,7 @@ function commitId() {
   if (!next) { idDraft.value = s.id || ''; return; }         // 清空 = 放弃修改
   if (next === s.id) { idDraft.value = next; return; }
   /* 引擎内存（含代码声明条目）与项目配置两边都查重 */
-  if (engineList().some((x) => x !== s && x.id === next)
+  if (project.engineList.some((x) => x !== s && x.id === next)
     || (S.proj.styles || []).some((x) => x !== s && x.id === next)) {
     toast('样式 id「' + next + '」已被其他样式占用', true);
     idDraft.value = s.id || '';
@@ -46,7 +47,7 @@ function commitId() {
   const ps = (S.proj.styles || []).find((x) => x && x.id === oldId);
   if (ps) ps.id = next;
   /* 当前正在编辑的就是这个样式 → 一起改掉，否则预览/面板会认不出它 */
-  if (S.styleId === oldId) S.styleId = next;
+  if (project.styleId === oldId) project.styleId = next;
   idDraft.value = next;
   scheduleSave();
 }
@@ -96,7 +97,7 @@ function copyStyle() {
 /* 删除属高危操作：需输入「确定」两个字 */
 async function delStyle() {
   if (!st.value) return;
-  if (engineList().length <= 1) { toast('至少保留一个样式', true); return; }
+  if (project.engineList.length <= 1) { toast('至少保留一个样式', true); return; }
   const name = st.value.name || st.value.id;
   try {
     await ElMessageBox.prompt(
@@ -115,7 +116,7 @@ async function delStyle() {
 }
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
-const LOCK = computed(() => S.lock.locked);
+const LOCK = computed(() => ui.isLocked);
 </script>
 
 <template>
@@ -123,9 +124,9 @@ const LOCK = computed(() => S.lock.locked);
     <!-- 与渲染区顶部同一份数据源（引擎内存优先）：点哪个就在预览哪个，两边同步 -->
     <div class="pv-styles">
       <span class="pv-styles-label">样式</span>
-      <button v-for="s in engineList()" :key="s.id" class="pv-style" :class="{ on: s.id === S.styleId }"
+      <button v-for="s in project.engineList" :key="s.id" class="pv-style" :class="{ on: s.id === project.styleId }"
         :title="'预览「' + (s.name || s.id) + '」'"
-        @click="S.styleId = s.id">{{ s.name || s.id }}</button>
+        @click="project.styleId = s.id">{{ s.name || s.id }}</button>
     </div>
     <div class="blk-sub" style="margin: 0 0 8px">
       数据来自引擎运行后的内存（AI 代码声明 + 上次存档恢复）。这里编辑元信息与参数，只存数据、

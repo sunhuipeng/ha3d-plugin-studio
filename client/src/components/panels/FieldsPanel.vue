@@ -1,7 +1,8 @@
 <script setup>
 import { computed } from 'vue';
 /* 面板：字段（插件级实体绑定，所有样式共用） */
-import { S, act, scheduleSave, ENTITY_DOMAINS, engineFieldList } from '../../store';
+import { useStudio } from '../../stores';
+const { act, scheduleSave, ENTITY_DOMAINS, project, ui } = useStudio();
 import {
   FIELD_TYPES, normalizeEnumValues, normalizeFieldType, suggestEnumTags,
 } from '../../field-schema';
@@ -44,7 +45,7 @@ function enumOptions(f) {
 }
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
-const LOCK = computed(() => S.lock.locked);
+const LOCK = computed(() => ui.isLocked);
 
 /* 属性 YAML 的即时反馈：解析失败当场报行号，别等渲染 / 发布才暴露。
    解析很快（几十行），每次渲染重算即可，不额外做防抖 */
@@ -62,7 +63,7 @@ function attrState(f) {
 
 <template>
   <section class="tabpage">
-    <div v-for="(f, i) in engineFieldList()" :key="i" class="ed-row">
+    <div v-for="(f, i) in project.fieldList" :key="i" class="ed-row">
       <label>标签
         <el-input :disabled="LOCK" clearable v-model="f.label" placeholder="如 门磁" @input="scheduleSave()" />
       </label>

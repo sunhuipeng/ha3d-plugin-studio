@@ -10,7 +10,9 @@
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import { Lock, Unlock } from '@element-plus/icons-vue';
-import { S, act, api, saveNow, scheduleSave, viewportApi, toast, engineList, syncEngineMirror } from '../store';
+import { useStudio } from '../stores';
+const { S, act, api, saveNow, scheduleSave, viewportApi, toast,
+        project, ui } = useStudio();
 import { ThreeHost, VIEW_PRESETS } from '../engine/three-host';
 import { PluginPreview } from '../engine/plugin-preview';
 import { normalizeOptions } from '../option-schema';
@@ -27,14 +29,14 @@ const axes = ref(false);
 
 /* 配置锁：锁定后左侧所有浮层面板只读，避免人和 AI 同时改配置互相覆盖。
  * 纯前端状态（S.lock），不写服务端 —— 刷新页面即自动解锁，不会锁死。 */
-const lockOn = computed(() => S.lock.locked);
+const lockOn = computed(() => ui.isLocked);
 const lockTitle = computed(() => (lockOn.value
   ? '配置已锁定（' + (S.lock.by === 'mcp' ? 'AI 锁定' : '你锁定') + '）：左侧面板只读，点击解锁'
   : '锁定配置：左侧面板转为只读（刷新页面即解锁）'));
 function toggleLock() {
-  act.setLock(!S.lock.locked).catch((e) => toast(e.message, true));
+  ui.setLock(!ui.isLocked).catch((e) => toast(e.message, true));
 }
-const status = computed(() => S.previewStatus);   // 单一数据源：S.previewStatus（PlanInset/CodePanel 也读它）
+const status = computed(() => ui.previewStatus);   // 单一数据源：ui.previewStatus（PlanInset/CodePanel 也读它）
 const entities = ref([]);
 /* 样式参数只有一个来源：项目 styles[].options[].def（AI 代码里写死的不作依据，
  * 引擎注册时会用项目配置覆盖）。这里不再维护第二份 styleOpts */
@@ -45,8 +47,8 @@ let disposed = false;
 
 /* 样式列表与当前样式：读引擎运行后的内存镜像（AI 代码声明什么就显示什么），
  * 没渲染过 / 渲染失败时由 engineList 回落项目配置 */
-const styles = computed(() => engineList());
-const curStyle = computed(() => styles.value.find((x) => x.id === S.styleId) || null);
+const styles = computed(() => project.engineList);
+const curStyle = computed(() => styles.value.find((x) => x.id === project.styleId) || null);
 const curStyleName = computed(() => (curStyle.value ? (curStyle.value.name || curStyle.value.id) : ''));
 
 /* 插件大类：渲染区运行状态上报的 kind 优先（反映实际注册结果），项目配置兜底 */
@@ -282,13 +284,13 @@ async function refreshOpts() {
   err.value = '';
   try {
     const st = await preview.respawn({
-      styleId: S.styleId,
+      styleId: project.styleId,
       safeW: isBg.value ? safeSize.value.w : undefined,
       safeD: isBg.value ? safeSize.value.d : undefined,
       safeH: isBg.value ? safeSize.value.h : undefined,
     });
     entities.value = preview.listEntities();
-    S.previewStatus = st;
+    ui.previewStatus = st;
     applyStyleMetaToPreview();
   } catch (e) {
     /* respawn 失败（def 已失效等）→ 全量渲染兜底 */
@@ -330,22 +332,22 @@ async function refresh(viewName, opts) {
     const st = await preview.load({
       project: S.proj,
       code,
-      styleId: S.styleId,
+      styleId: project.styleId,
       view: viewName || view.value,
       safeW: isBg.value ? safeSize.value.w : undefined,
       safeD: isBg.value ? safeSize.value.d : undefined,
       safeH: isBg.value ? safeSize.value.h : undefined,
     });
     entities.value = preview.listEntities();
-    S.previewStatus = st;
-    syncEngineMirror(preview);   // 内存镜像换到新 def：UI（胶囊/面板/卡片）从现在起读引擎数据
+    ui.previewStatus = st;
+    project.syncEngineMirror(preview);   // 内存镜像换到新 def：UI（胶囊/面板/卡片）从现在起读引擎数据
     syncStyleMeta();
     applyStyleMetaToPreview();   // 重建后把卡片上的 z / 标签高度再贴回预览样式，重新渲染不回弹
     return st;
   } catch (e) {
     err.value = e.message || String(e);
     entities.value = [];
-    S.previewStatus = { ok: false, error: err.value };
+    ui.previewStatus = { ok: false, error: err.value };
     return null;
   } finally {
     busy.value = false;
@@ -391,7 +393,7 @@ function toggleAxes() {
 
 function syncStatus() {
   if (!preview) return;
-  S.previewStatus = preview.describe();
+  ui.previewStatus = preview.describe();
 }
 
 /* 天气实体：背景插件 onData 的常用数据源，给一组可循环切换的 condition */
@@ -530,9 +532,9 @@ onMounted(async () => {
     refresh: (o) => refresh((o && o.view) || view.value, o || {}),
     /* 快速重生（MCP set_option 等用）：不重新执行代码，内存参数直接生效 */
     respawn: async (o) => {
-      const st = await preview.respawn(Object.assign({ styleId: S.styleId }, o || {}));
+      const st = await preview.respawn(Object.assign({ styleId: project.styleId }, o || {}));
       entities.value = preview.listEntities();
-      S.previewStatus = st;
+      ui.previewStatus = st;
       return st;
     },
     screenshot: (o) => host.snapshot(o || {}),
@@ -586,7 +588,7 @@ watch(() => S.proj && S.proj.id, (id) => {
 });
 /* 切样式 → 快速重生（内存 def 换个 style 条目重建实例，不重新执行代码）；
  * 还没成功渲染过（无 def）时全量渲染 */
-watch(() => S.styleId, () => {
+watch(() => project.styleId, () => {
   syncStyleMeta();
   if (disposed) return;
   if (preview && preview.def) refreshOpts();
@@ -635,11 +637,11 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
         </button>
       </div>
 
-      <!-- 快速切样式：与左侧「样式」面板、面板顶部胶囊共用 S.styleId -->
+      <!-- 快速切样式：与左侧「样式」面板、面板顶部胶囊共用 project.styleId -->
       <div v-if="styles.length > 1" class="pv-styles-bar">
         <span class="pv-qs-label">样式</span>
-        <button v-for="s in styles" :key="s.id" class="pv-style" :class="{ on: s.id === S.styleId }"
-          :title="'切到「' + (s.name || s.id) + '」并重新渲染'" @click="S.styleId = s.id">{{ s.name || s.id }}</button>
+        <button v-for="s in styles" :key="s.id" class="pv-style" :class="{ on: s.id === project.styleId }"
+          :title="'切到「' + (s.name || s.id) + '」并重新渲染'" @click="project.styleId = s.id">{{ s.name || s.id }}</button>
       </div>
     </div>
 

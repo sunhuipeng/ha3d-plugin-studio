@@ -7,9 +7,6 @@
   "scripts": {
     "start": "node server/index.js",
     "push:image:arm64": "bash scripts/push-image.sh linux/arm64",
-    "client:dev": "npm --prefix client run dev",
-    "client:build": "npm --prefix client run build",
-    "build": "npm --prefix client run build && node server/index.js",
     "push:image": "bash scripts/push-image.sh"
   },
   "dependencies": {

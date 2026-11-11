@@ -3,7 +3,8 @@
    下面是给 AI 的正文。点统揽里的任意名称即可复制，写提示词时不用来回翻别的面板。
    正文存在 proj.aiPrompt，MCP 的 studio_get_project 会带出去。 */
 import { computed, ref } from 'vue';
-import { S, scheduleSave, toast, engineList, engineFieldList } from '../../store';
+import { useStudio } from '../../stores';
+const { S, scheduleSave, toast, project, ui, assets } = useStudio();
 import { fieldTypeLabel, normalizeEnumValues, normalizeFieldType } from '../../field-schema';
 
 const prompt = computed({
@@ -14,9 +15,9 @@ const prompt = computed({
 const len = computed(() => (prompt.value || '').length);
 
 const plugin = computed(() => (S.proj && S.proj.plugin) || {});
-const fields = computed(() => engineFieldList());
-const styles = computed(() => engineList());
-const models = computed(() => S.models || []);
+const fields = computed(() => project.fieldList);
+const styles = computed(() => project.engineList);
+const models = computed(() => assets.models || []);
 
 /* 统揽分组默认全展开；点标题可收起（状态只在本面板内有效） */
 const open = ref({ attr: true, field: true, style: true, part: true });
@@ -56,7 +57,7 @@ const attrRows = computed(() => {
 });
 
 /* 配置锁：锁定期间面板内所有控件 disabled（纯前端，刷新即解锁） */
-const LOCK = computed(() => S.lock.locked);
+const LOCK = computed(() => ui.isLocked);
 </script>
 
 <template>
