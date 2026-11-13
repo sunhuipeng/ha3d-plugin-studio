@@ -2,8 +2,8 @@
 'use strict';
 
 const { z } = require('zod');
-const { listProjectSummaries, readProject, safeId } = require('../config');
-const hub = require('../ws-hub');
+const { listProjectSummaries, readProject, safeId } = require('../lib/config');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 function register(server) {

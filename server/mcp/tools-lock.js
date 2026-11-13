@@ -5,11 +5,16 @@
  *   里的输入控件变只读，用户只能看不能改；预览区、拖拽、渲染都照常可用。
  *   刷新 / 重开页面 = 自动解锁，不存在锁死解不开的情况。
  * 服务端只做中继，不存状态、不做写入拦截 —— 所以这三个工具必须编辑页开着才能用。
+ *
+ * ⚠ hub.call 按「焦点 / 可见 / 最新」只选**一个**页面发指令，但 MCP 的 activity/idle
+ * 横条是 hub.broadcast 给**所有**页面的。多标签页时会出现「横条说已解锁，用户眼前
+ * 这页却仍只读」。所以 lock/unlock 在单播拿到结果后，再给同项目所有页面补一条幂等
+ * 指令；前端 ws-client.js 另有 idle 兜底，覆盖未重启的旧服务端进程。
  */
 'use strict';
 
 const { z } = require('zod');
-const hub = require('../ws-hub');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 const lockOut = (pid, st) => ({
@@ -21,6 +26,18 @@ const lockOut = (pid, st) => ({
   note: st.note || '',
   readOnlyForUser: !!st.locked,
 });
+
+/* 给同项目所有页面补发一次幂等的 lock 指令（tool 消息所有版本前端都认识）。
+ * id 用 'lock-sync-' 前缀：服务端 pending 里没有对应项，多余的 tool_result 会被忽略，
+ * 不会和 hub.call 正在等待的那个请求串味。返回送达的连接数。 */
+function syncAll(pid, args) {
+  return hub.notify(pid, {
+    type: 'tool',
+    id: 'lock-sync-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    name: 'lock',
+    args,
+  });
+}
 
 function register(server) {
   server.tool(
@@ -36,10 +53,13 @@ function register(server) {
     async ({ projectId, note } = {}) => {
       try {
         const pid = H.requirePid(projectId);
-        const st = await hub.call(pid, 'lock', { locked: true, note: note || '' }, 20000);
+        const args = { locked: true, note: note || '' };
+        const st = await hub.call(pid, 'lock', args, 20000);
+        const syncedFrontends = syncAll(pid, args);
         return H.text({
           ...lockOut(pid, st),
-          message: '已锁定：用户左侧面板转为只读（刷新页面会自动解锁）；你现在可以放心改配置 / 代码。',
+          syncedFrontends,
+          message: '已锁定：左侧面板转为只读（刷新页面会自动解锁），并已同步到同项目所有打开的页面；你现在可以放心改配置 / 代码。',
         });
       } catch (e) { return H.fail(e.message); }
     },
@@ -56,10 +76,13 @@ function register(server) {
     async ({ projectId, note } = {}) => {
       try {
         const pid = H.requirePid(projectId);
-        const st = await hub.call(pid, 'lock', { locked: false, note: note || '' }, 20000);
+        const args = { locked: false, note: note || '' };
+        const st = await hub.call(pid, 'lock', args, 20000);
+        const syncedFrontends = syncAll(pid, args);
         return H.text({
           ...lockOut(pid, st),
-          message: '已解锁：用户左侧面板恢复可编辑。',
+          syncedFrontends,
+          message: '已解锁：左侧面板恢复可编辑，并已同步到同项目所有打开的页面。',
         });
       } catch (e) { return H.fail(e.message); }
     },
@@ -76,11 +99,16 @@ function register(server) {
       try {
         const pid = H.requirePid(projectId);
         const st = await hub.call(pid, 'lock', {}, 20000);
+        const frontends = hub.listFrontends().filter((f) => f.alive && f.projectId === pid).length;
         return H.text({
           ...lockOut(pid, st),
-          hint: st.locked
+          frontends,
+          hint: (st.locked
             ? '用户面板当前只读（' + (st.by === 'mcp' ? 'AI 锁的' : '用户自己锁的') + '），刷新页面会自动解锁'
-            : '未锁定：用户可以直接手改左侧面板',
+            : '未锁定：用户可以直接手改左侧面板')
+            + (frontends > 1
+              ? `；当前有 ${frontends} 个页面打开该项目，lock/unlock 会同步到全部页面，本结果取自被选中的那一页`
+              : ''),
         });
       } catch (e) { return H.fail(e.message); }
     },

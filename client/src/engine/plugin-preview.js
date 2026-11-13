@@ -5,6 +5,7 @@
  * 以及供 MCP 使用的：视角、旋转/平移、截图、实体状态注入。
  */
 import { createPluginEngine } from './plugin-engine';
+import { CardEngine } from './cards.js';
 import { createMockHa, guessEntityId } from './mock-ha';
 import { clamp } from './math';
 import { parseAttrsYaml } from '../attrs-yaml';
@@ -259,14 +260,17 @@ export class PluginPreview {
   }
 
   _mainDomain(def) {
-    /* 门/窗（贴墙设备）的开合状态来自字段（binary_sensor 门磁 / 开度），不绑主实体 */
+    /* 门/窗（贴墙设备）的开合状态来自字段（binary_sensor 门磁 / 开度），不绑主实体；
+       家具（type:'furniture'）同理没有 HA 实体（纯造型），不造假主实体 */
     if (isWallType(def && def.type)) return 'binary_sensor';
+    if (def && def.type === 'furniture') return '';
     return TYPE_DOMAIN[def.type] || 'switch';
   }
 
-  /** 构造预览实例数据（等价于 ha-3d-home 里一台设备 / 一扇门的 obj） */
+  /** 构造预览实例数据（等价于 ha-3d-home 里一台设备 / 一扇门 / 一件家具的 obj） */
   _makeObj(def, style) {
     const isWall = isWallType(def.type);
+    const isFurn = def.type === 'furniture';
     const mainDomain = this._mainDomain(def);
     const obj = {
       id: 'preview',
@@ -274,8 +278,9 @@ export class PluginPreview {
       pct: 100,
       style: style ? style.id : 'default',
       styleOpts: {},
-      /* 设备可以绑一台真实设备（设置里填）；门/窗没有这个概念，稍后指向门磁字段 */
-      entityId: isWall
+      /* 设备可以绑一台真实设备（设置里填）；门/窗没有这个概念，稍后指向门磁字段；
+         家具没有 HA 实体，恒为空 */
+      entityId: (isWall || isFurn)
         ? ''
         : (((this.project && this.project.plugin && this.project.plugin.entityId) || '').trim()
           || `${mainDomain}.preview_main`),
@@ -392,6 +397,81 @@ export class PluginPreview {
     const st = this.ha.getState(this.obj.entityId);
     if (!st) return '';
     return this.engine.labelOf(def.id, st, this.obj, null, this.styleId) || '';
+  }
+
+  /* ---------------- 卡片预览（只读） ----------------
+   * studio 不接 HA：卡片只展示 mock 实体状态下插件 cards() 的样子，
+   * 控件动作不会反向改状态。结构由编排层（composables/useCards.js）组装，
+   * 值随 mock-ha 的 change 广播重算，见 ui store 的 entityVersion。 */
+
+  /** 插件声明 cards(ctx) → 原始数组。与 home 的 PluginEngine.cardsOf 同口径，
+   *  只是把 getState / isOn 指到本地 mock；返回 Promise / 抛错都按未声明处理。 */
+  cardsOf() {
+    const def = this.def;
+    if (!def || typeof def.cards !== 'function' || !this.obj) return null;
+    try {
+      const r = def.cards({
+        type: this._typeKey(),
+        obj: this.obj,
+        style: (this.style && (this.style.sid || this.style.id)) || this.styleId,
+        options: this.engine.styleOptionsOf(this.style, this.obj),
+        entityId: this.obj.entityId || '',
+        getState: (eid) => this.ha.getState(eid),
+        isOn: (eid) => this.isOnOf(eid),
+      });
+      if (!r || typeof r !== 'object' || typeof r.then === 'function') return null;
+      return r;
+    } catch (e) {
+      console.warn('[preview] cards() 出错:', e && e.message ? e.message : e);
+      return null;
+    }
+  }
+
+  /** 卡片 switch 控件的开态：主实体走插件 isOn（isOnNow），扩展实体走 mock isOn */
+  isOnOf(eid) {
+    if (eid && this.obj && eid === this.obj.entityId) return this.isOnNow();
+    return !!this.ha.isOn(eid);
+  }
+
+  /** 门控：只有「有主实体的设备类」才有卡片。
+   *  背景插件、家具包、type:'furniture'（纯造型无实体）、缺门磁字段的门窗都不出卡。 */
+  cardAvailable() {
+    return !!(this.def && this.obj && this.def.kind === 'device'
+      && this.def.type !== 'furniture' && this.obj.entityId);
+  }
+
+  /** 单台预览实例的卡片结构（未装饰），交给 CardEngine.buildListCard 组装。
+   *  clickable 显式传入，绕开 cards.js 里读 window.PluginEngine 的兜底分支。 */
+  buildCard() {
+    if (!this.cardAvailable()) return null;
+    const type = this._typeKey();
+    const spec = this.engine.clickSpec(type, this.styleId);
+    const clickable = !!(spec && spec.defaultOn !== false && this.obj.click !== false);
+    return CardEngine.buildCard({
+      obj: this.obj,
+      entityId: this.obj.entityId,
+      type,
+      kind: 'device',
+      style: this.obj.style,
+      cards: this.cardsOf(),
+      clickable,
+      getState: (eid) => this.ha.getState(eid),
+      isOn: (eid) => this.isOnOf(eid),
+    });
+  }
+
+  /** 标题电源开关的注入数据（CardPowerToggle 的 props 来源）。
+   *  显隐与 home「instanceClickSpec 非 null」同口径：插件没 click / defaultOn:false 都不显示。 */
+  cardPower() {
+    const blank = { clickable: false, on: false, words: ['开', '关'], readonly: true };
+    if (!this.cardAvailable()) return blank;
+    const spec = this.engine.clickSpec(this._typeKey(), this.styleId);
+    const clickable = !!(spec && spec.defaultOn !== false && this.obj.click !== false);
+    const parts = String((spec && spec.label) || '开 / 关')
+      .split(/\s*[\/／|｜]\s*/).map((s) => s.trim()).filter((s) => s.length);
+    const words = parts.length > 1 ? [parts[0], parts[1]]
+      : (parts.length ? [parts[0], parts[0]] : ['开', '关']);
+    return { clickable, on: this.isOnNow(), words, readonly: true };
   }
 
   /* ---------------- 点击控制（设备/标签 → 切实体状态，口径同 ha-3d-home） ---------------- */

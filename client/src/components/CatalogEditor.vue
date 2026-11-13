@@ -306,7 +306,7 @@ async function doPublish(bump) {
             AI 可直接读取家具清单与 GLB 解析、读取分类、上传模型并配置属性、全量覆盖属性、批量删模型、导出 / 发布家具包；
             还能点选左侧清单、旋转 / 平移 3D 视图并按机位截图，改动会实时同步到本页面。<br>
             <span style="color: #9aa4b2">studio_list_catalog_items · studio_get_catalog_item · studio_get_catalog_types ·
-              studio_set_catalog_item · studio_upload_catalog_model · studio_delete_models · studio_select_catalog_item ·
+              studio_set_catalog_item · studio_upload_catalog_model · studio_delete_catalog_items · studio_select_catalog_item ·
               studio_refresh_catalog · studio_get_catalog_selection ·
               studio_view / studio_screenshot（公共） · studio_export_catalog · studio_publish_catalog</span>
           </div>

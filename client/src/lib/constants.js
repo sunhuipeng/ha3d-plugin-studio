@@ -5,12 +5,18 @@
  *   DEVICE_TYPES —— HA 实体域（灯/开关/空调…）
  *   WALL_TYPES   —— 贴墙设备：门 / 窗。它们**没有独立的 kind**，就是 type 不同的设备类，
  *                   只是数据放在 home 的 floors.doors/windows 里、默认不显示 3D 标签。
+ *   FURN_TYPES   —— 动态家具：type:'furniture'，用 model3d 按参数现场建模（参考 home 的 wardrobe），
+ *                   实例存 home 的 floors.devices，缺省无 3D 标签 / 不可点击 / 贴地。
+ *                   家具分类由插件级 `ftype` 声明（取值 = home 的 assets/catalog.json types，
+ *                   枚举运行时由 GET /api/catalog-types 下发，见 stores/assets.js）。
  * OPENING_TYPES 是旧名字（面板与脚本仍在用），等价于 WALL_TYPES。 */
 export const DEVICE_TYPES = ['light', 'switch', 'sensor', 'climate', 'water_heater', 'cover', 'fan', 'media_player', 'vacuum', 'camera', 'other'];
 export const WALL_TYPES = ['door', 'window'];
+export const FURN_TYPES = ['furniture'];
 export const OPENING_TYPES = WALL_TYPES;
-export const MODEL_TYPES = DEVICE_TYPES.concat(WALL_TYPES);
+export const MODEL_TYPES = DEVICE_TYPES.concat(WALL_TYPES, FURN_TYPES);
 export const isWallType = (t) => t === 'door' || t === 'window';
+export const isFurnType = (t) => t === 'furniture';
 export const OPTION_TYPES = [
   { value: 'range', label: 'range 滑条' },
   { value: 'number', label: 'number 数字' },

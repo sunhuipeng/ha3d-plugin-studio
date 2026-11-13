@@ -11,6 +11,14 @@
   --danger: #d9534f;
   --warn: #b98124;
   --radius: 8px;
+
+  /* 卡片组件（components/common/cards/*）与 ha-3d-home 同源，依赖这几个变量名。
+     这里只做别名映射到 studio 现有主题，不改组件 scoped 样式。 */
+  --panel: #ffffff;
+  --ink: #2a3038;
+  --ink2: #6b7484;
+  --blue: #2f7fe0;
+  --blue-soft: #e8f1fe;
 }
 
 * {
@@ -1365,6 +1373,37 @@ textarea:not([class]) {
   top: 10px;
   right: 10px;
   z-index: 6;
+}
+
+/* 卡片只读预览：紧贴在 2D 平面预览下方，宽度与 home 编辑页 #cardPreview 一致（320px），
+   不与平面预览等宽 —— 4 列栅格需要这个宽度才放得下控件。 */
+.pv-cards {
+  position: absolute;
+  top: 210px;              /* 平面预览 top:10 + 高 190 + 10 间隙 */
+  right: 10px;
+  z-index: 6;
+  width: 320px;
+  max-height: calc(100% - 230px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.pv-cards-head {
+  display: flex; align-items: center; justify-content: space-between;
+  flex: none; padding: 4px 9px;
+  font-size: 11px; font-weight: 700; color: var(--fg-dim);
+  background: rgba(255, 255, 255, .94);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.pv-cards-tag { font-size: 10px; font-weight: 400; color: #93a0b3; }
+.pv-cards > .dc-shell { width: 100%; flex: none; }
+.pv-cards-empty {
+  flex: none; padding: 16px 12px; text-align: center;
+  font-size: 12px; color: var(--fg-dim);
+  background: rgba(255, 255, 255, .92);
+  border: 1px dashed #b9c6da; border-radius: 12px;
 }
 .plan-inset {
   width: 262px;

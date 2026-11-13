@@ -1,4 +1,4 @@
-/* 插件打包 + 远程发布（routes.js 的 HTTP 端点与 mcp-tools.js 的 MCP 工具共用）
+/* 插件打包 + 远程发布（publish.js 的 HTTP 端点与 mcp-tools.js 的 MCP 工具共用）
  *
  * zip 包内结构（无顶层目录）:
  *   plugin.json   插件清单（id = 项目 id，含 version）
@@ -48,7 +48,7 @@ async function buildProjectZip(projectId) {
 }
 
 /* 导出/发布共用前置：读项目 → 注入 models → 校验 → 构建 → 打包。
- * routes 的 /export、MCP 的 studio_export_project、publishProject 三处共用，保证
+ * publish.js 的 /export、MCP 的 studio_export_project、publishProject 三处共用，保证
  * 「校验口径 + zip 内容」完全一致。
  * 返回 { proj, built, buf, copied, warnings }；项目不存在 throw code=NOT_FOUND，
  * 配置有 error 级问题 throw code=INVALID（带 warnings），调用方自行转成各自的错误形态。 */
@@ -126,4 +126,4 @@ async function publishProject(projectId, bump) {
   return { manifest: built.manifest, copied, remote };
 }
 
-module.exports = { buildPluginZip, buildProjectZip, prepareExportZip, publishProject };
+module.exports = { buildProjectZip, prepareExportZip, publishProject };

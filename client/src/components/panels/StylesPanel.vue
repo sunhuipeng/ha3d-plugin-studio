@@ -11,10 +11,12 @@ const st = computed(() => project.curStyle);
 /* 背景插件项目才有「添加位置参数」按钮（offsetX / offsetZ / houseY 是 home 背景引擎的保留键） */
 const isBgProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.kind === 'background'));
 
-/* 设备类插件项目（含门/窗）：只有它显示 离地 z / 标签高度（背景没有这两个概念） */
+/* 设备类插件项目（含门/窗/家具）：只有它显示 离地 z / 标签高度（背景没有这两个概念） */
 const isDeviceProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.kind === 'device'));
 /* 门的离地高度恒 0（贴地不可调）；窗与普通设备才显示 z */
 const isDoorProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.type === 'door'));
+/* 家具（type:'furniture'）缺省不显示 3D 标签，标签高度对它没有意义 */
+const isFurnProj = computed(() => !!(S.proj && S.proj.plugin && S.proj.plugin.type === 'furniture'));
 
 /* 还没填 key 的参数条数：key 是插件读值的唯一入口（ctx.options.key / p.options.key），
    空着只能是编辑期的半成品，这里显式提示，免得以为是「加了却没生效」的 bug */
@@ -151,7 +153,7 @@ const LOCK = computed(() => ui.isLocked);
           <label v-else>离地 z(米)
             <el-input :model-value="0" disabled title="门恒贴地，离地高度固定 0（不可调）" />
           </label>
-          <label>标签高度(米)
+          <label v-if="!isFurnProj">标签高度(米)
             <el-input :disabled="LOCK" clearable v-model="st.labelOffset" placeholder="距地高度，如 1.5" @input="scheduleSave()" />
           </label>
         </template>

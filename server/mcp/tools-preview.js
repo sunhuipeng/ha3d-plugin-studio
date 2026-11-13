@@ -3,9 +3,9 @@
 'use strict';
 
 const { z } = require('zod');
-const { readProject } = require('../config');
-const { normalizeOptionType } = require('../option-schema');
-const hub = require('../ws-hub');
+const { readProject } = require('../lib/config');
+const { normalizeOptionType } = require('../lib/option-schema');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 /* 插件引擎专属动作（样式 / 参数 / 实体 / 点击 / 运行期）在家具页没有对应实现，

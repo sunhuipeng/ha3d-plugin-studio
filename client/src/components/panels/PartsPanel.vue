@@ -3,6 +3,11 @@
  *
  * 模型文件以 models 目录为唯一来源（assets.models），项目 JSON 里不保存 parts：
  * 模型怎么摆由插件代码决定（ctx.frame / ctx.glb('models/x.glb') / ctx.box …）。
+ *
+ * GLB 边界：节点树（thumb.js）/ 缩略图 / 包围盒 / 顶点统计都在浏览器端本地解析；
+ * 只有「✂ 拆分」与「修复材质」走服务端（routes/models.js 的 /split、/fix-materials），
+ * 因为拆分要逐顶点烘焙世界变换、修材质要原地改写 glb 的 materials。
+ * MCP 侧同理：get_model 只负责给下载地址，AI 下载后用 Python / Node.js 直接解析（零依赖，不引第三方库）。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { useStudio } from '../../stores';

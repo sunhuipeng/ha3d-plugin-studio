@@ -6,6 +6,7 @@
 'use strict';
 
 const { safeId } = require('./config');
+const { FALLBACK_TYPES } = require('./catalog-schema');
 const { normalizeOptionType } = require('./option-schema');
 const { FIELD_TYPE_VALUES, normalizeFieldType, normalizeEnumValues } = require('./field-schema');
 
@@ -28,11 +29,17 @@ function buildManifest(proj, bump) {
   }
   /* id 一律 = 项目 id：安装端按它定位/替换插件目录，重复安装永远覆盖同一份，
    * 不再单独维护 projectId 字段（插件 id 输入框只用于展示，写入时以项目 id 为准）
-   * kind 只有两类：device（设备 + 门/窗，靠 type 区分）与 background。
+   * kind 只有两类：device（设备 + 门/窗 + 家具，靠 type 区分）与 background。
    * 老项目里残留的 kind:'opening' 在导出时归一成 device（home 侧已废除 opening） */
   const kind = p.kind === 'opening' ? 'device' : (p.kind || 'device');
   const mf = { id: proj.id, name: p.name || proj.id, version, kind };
-  if (kind !== 'background') mf.type = p.type || 'other';
+  if (kind !== 'background') {
+    mf.type = p.type || 'other';
+    /* ftype = 家具分类，只对 type:'furniture' 生效（home 端 register 只小写 trim、不校验枚举；
+     * 枚举外的值归入「其他」）。非家具类型一律不写，避免 manifest 里留个没用的键 */
+    const ftype = String(p.ftype || '').trim().toLowerCase();
+    if (mf.type === 'furniture' && ftype) mf.ftype = ftype;
+  }
   if (p.description) mf.description = p.description;
   return mf;
 }
@@ -47,7 +54,15 @@ function validate(proj) {
   const p = proj.plugin || {};
   if (!safeId(proj.id)) w.push({ level: 'error', msg: '项目 id 不合法（应为小写字母开头的字母/数字/下划线）' });
   if (!p.name) w.push({ level: 'error', msg: '插件名称不能为空' });
-  if (p.kind !== 'background' && !p.type) w.push({ level: 'error', msg: '设备类插件（含门/窗）必须选择 type' });
+  if (p.kind !== 'background' && !p.type) w.push({ level: 'error', msg: '设备类插件（含门/窗、家具）必须选择 type' });
+  /* ftype 只对家具生效：非家具写了会被 manifest 忽略，枚举外的值 home 会归入「其他」。
+   * 两条都只 warn —— 不影响能否发布，但要让人知道为什么面板上分类没生效 */
+  const ftype = String(p.ftype || '').trim().toLowerCase();
+  if (ftype && p.type !== 'furniture') {
+    w.push({ level: 'warn', msg: `ftype 只对 type:'furniture' 生效，当前 type=${p.type || '空'}，导出时会忽略 ftype` });
+  } else if (ftype && !FALLBACK_TYPES.includes(ftype)) {
+    w.push({ level: 'warn', msg: `ftype「${ftype}」不在家具分类枚举内（${FALLBACK_TYPES.join(' / ')}），home 会归入「其他」` });
+  }
   /* 参数(options)按样式校验 */
   const styles = (proj.styles && proj.styles.length ? proj.styles : [{ id: 'default' }]);
   for (const s of styles) {

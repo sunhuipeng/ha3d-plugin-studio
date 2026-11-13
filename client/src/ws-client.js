@@ -170,6 +170,15 @@ function onMcpEvent(msg) {
     mcp.tool = msg.tool || '…';
     mcp.since = Date.now();
   } else if (msg.event === 'idle') {
+    /* 配置锁兜底：MCP 横条事件是 hub.broadcast 给所有页面的，而 lock/unlock 指令
+     * （服务端 hub.call）只发给被选中的一个页面。多标签页 / 测试页在线时会出现
+     * 「横条写已解锁，用户眼前这页却仍只读」。这里让看到 unlock 横条的每一页都
+     * 同步解锁，与广播口径一致；服务端 tools-lock.js 的 syncAll 是同幂等双保险，
+     * 旧服务端进程（未重启）也能靠这条把状态对齐。只对 unlock 兜底：工具失败时
+     * 偏向「放开编辑权」是安全的，反过来误锁就不合适了。 */
+    if (msg.tool === 'studio_unlock_config') {
+      applyLock({ locked: false, by: 'mcp', at: Date.now(), note: '' });
+    }
     const cost = mcp.since ? Date.now() - mcp.since : 0;
     if (msg.tool) mcp.tool = msg.tool;
     /* 太快了就等够最短展示时长再切回等待态 */

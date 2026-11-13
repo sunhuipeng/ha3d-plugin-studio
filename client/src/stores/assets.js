@@ -2,6 +2,10 @@
  *
  * 这两块以前混在项目 store 里，其实服务的是完全不同的 UI（部件面板 / 家具编辑器），
  * 拆出来后各自的状态、加载与出错提示都在一个 store 内闭环，Action 可单独被 ws-client 调用。
+ *
+ * GLB 边界：列模型 / 上传 / 删除是纯文件操作；节点树与缩略图由 thumb.js 在浏览器本地解析；
+ * 拆分（/split）与修复材质（/fix-materials）是仅有的两类服务端 GLB 写操作，设备 / 背景插件
+ * 编辑页与 MCP 工具共用，保持兼容。尺寸实测也在前端本地做（CatalogEditor.measureBuffer）。
  */
 import { defineStore } from 'pinia';
 import { api } from '../lib/api';

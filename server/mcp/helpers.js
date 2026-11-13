@@ -1,24 +1,33 @@
 /* MCP 工具公共助手（被 tools-*.js 各域模块共用）
  *
+ * GLB 边界（2026-11-12 定）：服务端只做「拆分」与「修复材质」两类写操作；
+ * GLB 的结构 / 顶点 / 包围盒 / 尺寸一律不在服务端解析、也不返回给 AI，
+ * 由 MCP 把 .glb 下载到本机后，AI 自己在本地解析（见下方 GLB_PARSE）。详见 README「GLB 处理边界」。
+ *
  * 目录结构：
- *   mcp/helpers.js         ← 本文件：输出格式 / 项目 id 解析 / 分项输出 / glb 解析 / 活动横条
+ *   mcp/helpers.js         ← 本文件：输出格式 / 项目 id 解析 / 分项输出 / 活动横条
  *   mcp/tools-config.js    get_project / get_code / write_code
  *   mcp/tools-preview.js   set_style / set_option / click / label / reload / view / screenshot / set_entity / get_runtime
  *   mcp/tools-projects.js  list_projects / where / single_window / open_project
  *   mcp/tools-lock.js      lock_config / unlock_config / get_lock（前端只读锁，服务端只中继）
  *   mcp/tools-models.js    upload / get / list / split / delete / rename / fix_model_materials
  *   mcp/tools-publish.js   export_project / publish_project
- *   ../mcp-tools.js        装配入口（buildMcpServer）
+ *   mcp/tools.js           装配入口（buildMcpServer）
  */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
-const { modelsDir, readProject, safeId, listModels } = require('../config');
-const { normalizeOptionType } = require('../option-schema');
-const { normalizeFieldType, normalizeEnumValues, splitList } = require('../field-schema');
-const hub = require('../ws-hub');
-const { glbDetail, measureGlb } = require('../glb-info');
+const { modelsDir, readProject, safeId, listModels } = require('../lib/config');
+const { normalizeOptionType } = require('../lib/option-schema');
+const { normalizeFieldType, normalizeEnumValues, splitList } = require('../lib/field-schema');
+const hub = require('../lib/ws-hub');
+
+/* 面向 AI 的「怎么解析 GLB」统一口径：只用 Python / Node.js 直读二进制容器，
+ * 不引导使用 three.js、gltf-transform、trimesh 等第三方库（本机不一定装得上，
+ * 装上了版本差异也会让解析结果不可复现）。所有工具描述 / hint 引用这一句，别各写一套。 */
+const GLB_PARSE = '下载到本机后用 Python 或 Node.js 直接解析（GLB = 12 字节头 + JSON chunk + BIN chunk，'
+  + '读 accessors 就能拿到节点树 / 包围盒 / 材质，零依赖即可，不要引入 three.js 等第三方库）';
 
 /* ---- 工具返回值 ---- */
 const text = (s) => ({ content: [{ type: 'text', text: typeof s === 'string' ? s : JSON.stringify(s, null, 2) }] });
@@ -75,7 +84,7 @@ function codeRefLines(pid, fileName) {
 
 /* ---- 分项输出（一站式与分项工具共用，保证字段口径一致） ---- */
 function settingsOut(p) {
-  return {
+  const out = {
     id: p.plugin?.id || '',
     name: p.plugin?.name || '',
     kind: p.plugin?.kind || 'device',
@@ -84,6 +93,10 @@ function settingsOut(p) {
     description: p.plugin?.description || '',
     entityId: p.plugin?.entityId || '',
   };
+  /* ftype 只在 type:'furniture' 时有意义（家具分类，取值 = home 的 catalog.json types），
+   * 其他类型不输出这个键，免得 AI 以为它通用 */
+  if (out.type === 'furniture' && p.plugin?.ftype) out.ftype = String(p.plugin.ftype);
+  return out;
 }
 function fieldsOut(p) {
   return (p.fields || []).filter((f) => f && f.key).map((f) => {
@@ -152,9 +165,9 @@ function assertPluginProject(projectId) {
     throw new Error(`项目 ${pid} 是家具包（kind: catalog），没有插件代码 / 样式 / 实体 / 插件预览引擎。`
       + '家具项目请用：studio_list_catalog_items、studio_get_catalog_item、studio_set_catalog_item、'
       + 'studio_upload_catalog_model、studio_get_catalog_types、studio_select_catalog_item、'
-      + 'studio_delete_catalog_item、studio_export_catalog、studio_publish_catalog；'
+      + 'studio_delete_catalog_items、studio_export_catalog、studio_publish_catalog；'
       + '视图 / 截图 / 模型文件操作用公共工具：studio_view、studio_screenshot、studio_list_models、'
-      + 'studio_get_model、studio_upload_model、studio_delete_models、studio_split_model、studio_fix_model_materials');
+      + 'studio_get_model、studio_split_model、studio_fix_model_materials');
   }
   return pid;
 }
@@ -180,103 +193,6 @@ function projectConfig(p, pid) {
       lines: String(p.customJs || '').split('\n').length,
     },
   };
-}
-
-/* 解析 GLB 二进制头 + JSON chunk，提取结构摘要（网格 / 节点 / 材质 / 动画 / 包围盒）。
- * 供 AI 拿到导出路径后快速了解模型构成，不必再自己写解析脚本。 */
-function glbSummary(buf) {
-  if (!buf || buf.length < 12 || buf.readUInt32LE(0) !== 0x46546c67) return { format: 'not-glb' };
-  const out = { format: 'glb', version: buf.readUInt32LE(4) };
-  let off = 12, json = null;
-  while (off + 8 <= buf.length) {
-    const len = buf.readUInt32LE(off);
-    const type = buf.readUInt32LE(off + 4);
-    if (type === 0x4e4f534a) {
-      try { json = JSON.parse(buf.slice(off + 8, off + 8 + len).toString('utf8')); } catch (e) { /* 损坏就跳过 */ }
-      break;
-    }
-    off += 8 + len;
-  }
-  if (json) {
-    out.meshes = (json.meshes || []).length;
-    out.nodes = (json.nodes || []).length;
-    out.materials = (json.materials || []).length;
-    out.animations = (json.animations || []).length;
-    out.textures = (json.textures || []).length;
-    const mn = [Infinity, Infinity, Infinity];
-    const mx = [-Infinity, -Infinity, -Infinity];
-    let hasPos = false;
-    for (const m of json.meshes || []) {
-      for (const p of m.primitives || []) {
-        const a = (json.accessors || [])[(p.attributes || {}).POSITION];
-        if (!a || !a.min || !a.max) continue;
-        hasPos = true;
-        for (let i = 0; i < 3; i++) {
-          mn[i] = Math.min(mn[i], a.min[i]);
-          mx[i] = Math.max(mx[i], a.max[i]);
-        }
-      }
-    }
-    if (hasPos) {
-      out.bbox = {
-        min: mn.map((v) => Math.round(v * 1000) / 1000),
-        max: mx.map((v) => Math.round(v * 1000) / 1000),
-        size: mx.map((v, i) => Math.round((v - mn[i]) * 1000) / 1000),   // [宽(x) 高(y) 厚(z)]，米
-      };
-      out.bboxNote = 'POSITION accessor 的 min/max（未叠加节点变换），size 单位为米';
-    }
-    /* 逐 mesh 概要：AI 常需要「这个模型由哪几块组成、各多大」（门框/门扇/把手…） */
-    const meshes = json.meshes || [];
-    if (meshes.length) {
-      out.meshList = meshes.slice(0, 20).map((m, mi) => {
-        let verts = 0, tris = 0;
-        const bmn = [Infinity, Infinity, Infinity];
-        const bmx = [-Infinity, -Infinity, -Infinity];
-        for (const p of m.primitives || []) {
-          const pos = (json.accessors || [])[(p.attributes || {}).POSITION];
-          if (pos) {
-            verts += pos.count || 0;
-            if (pos.min && pos.max) for (let i = 0; i < 3; i++) {
-              bmn[i] = Math.min(bmn[i], pos.min[i]);
-              bmx[i] = Math.max(bmx[i], pos.max[i]);
-            }
-          }
-          const idx = (json.accessors || [])[p.indices];
-          if (idx) tris += Math.round((idx.count || 0) / 3);
-        }
-        const row = {
-          index: mi,
-          name: m.name || '',
-          primitives: (m.primitives || []).length,
-          verts,
-          tris,
-        };
-        if (Number.isFinite(bmn[0])) {
-          row.size = bmx.map((v, i) => Math.round((v - bmn[i]) * 1000) / 1000);
-          row.min = bmn.map((v) => Math.round(v * 1000) / 1000);
-          row.max = bmx.map((v) => Math.round(v * 1000) / 1000);
-        }
-        return row;
-      });
-      if (meshes.length > 20) out.meshListNote = `只列前 20 个，共 ${meshes.length} 个 mesh，其余请用本地脚本解析`;
-    }
-    /* 顶层节点名：studio_split_model 的 node 参数就用这里面的名字 */
-    const nodes = json.nodes || [];
-    if (nodes.length) {
-      const child = new Set();
-      nodes.forEach((n) => (n.children || []).forEach((c) => child.add(c)));
-      const roots = [];
-      nodes.forEach((n, i) => { if (!child.has(i)) roots.push(i); });
-      out.nodeList = roots.slice(0, 30).map((i) => ({
-        index: i,
-        name: nodes[i].name || '',
-        mesh: nodes[i].mesh == null ? null : nodes[i].mesh,
-        children: (nodes[i].children || []).length,
-      }));
-      if (roots.length > 30) out.nodeListNote = `只列前 30 个顶层节点，共 ${roots.length} 个`;
-    }
-  }
-  return out;
 }
 
 /* 让每一次工具调用都在前端横条上留下痕迹：
@@ -306,8 +222,9 @@ function wrapToolActivity(server) {
 
 module.exports = {
   text, fail,
+  GLB_PARSE,
   resolveProjectId, requirePid, assertPluginProject, friendlyRelayError,
   SCREEN_VIEWS, modelsWithSize, codeRefLines,
   settingsOut, fieldsOut, stylesOut, modelsOut, catalogOut, projectConfig,
-  glbSummary, glbDetail, measureGlb, wrapToolActivity,
+  wrapToolActivity,
 };

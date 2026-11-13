@@ -43,4 +43,4 @@ function fallbackTypes() {
   return FALLBACK_TYPES.slice();
 }
 
-module.exports = { resolveCatalogTypes, fallbackTypes, fallback, norm };
+module.exports = { resolveCatalogTypes, fallbackTypes };

@@ -12,8 +12,8 @@
 'use strict';
 
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
-const { buildMcpServer } = require('./mcp-tools');
-const hub = require('./ws-hub');
+const { buildMcpServer } = require('./tools');
+const hub = require('../lib/ws-hub');
 
 const sessions = new Map(); // sessionId -> { transport, server, openedAt }
 

@@ -28,6 +28,9 @@ export const useUiStore = defineStore('studio-ui', {
     previewFile: '',
     previewNode: '',
     previewStatus: null,     // 插件渲染区状态快照（PluginStage 写，PlanInset/CodePanel 读）
+    /* mock 实体状态变化计数：卡片值树靠它重算（与 home 的 haStore.entityVersion 同口径）。
+       Map / WebSocket / 引擎实例绝不进 store，这里只是一个轻量版本号。 */
+    entityVersion: 0,
   }),
 
   getters: {
@@ -62,6 +65,8 @@ export const useUiStore = defineStore('studio-ui', {
     setPreviewNode(node) { this.previewNode = node || ''; },
     setPreviewStatus(st) { this.previewStatus = st; },
     clearPreview() { this.previewFile = ''; this.previewNode = ''; },
+    /* 实体状态广播（mock-ha.on）的唯一写入口：只递增版本号，不复制实体表。 */
+    bumpEntityVersion() { this.entityVersion++; },
 
     /* 点击「模型文件库」列表项以外的任意位置 → 取消预览高亮（见 installUiGuards） */
     clearPreviewOutside(e) {

@@ -44,11 +44,4 @@ function stripExtraOptionKeys(o, type) {
   return o;
 }
 
-module.exports = {
-  OPTION_TYPE_VALUES,
-  OPTION_TYPE_FIELDS,
-  OPTION_TYPE_ONLY_KEYS,
-  normalizeOptionType,
-  optionOwns,
-  stripExtraOptionKeys,
-};
+module.exports = { normalizeOptionType, stripExtraOptionKeys };

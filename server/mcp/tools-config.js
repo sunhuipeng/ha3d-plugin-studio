@@ -2,11 +2,11 @@
 'use strict';
 
 const { z } = require('zod');
-const { readProject, writeProject } = require('../config');
-const { buildAll } = require('../generator');
-const { normalizeOptionType, stripExtraOptionKeys } = require('../option-schema');
-const { normalizeFieldType, normalizeEnumValues, splitList } = require('../field-schema');
-const hub = require('../ws-hub');
+const { readProject, writeProject } = require('../lib/config');
+const { buildAll } = require('../lib/generator');
+const { normalizeOptionType, stripExtraOptionKeys } = require('../lib/option-schema');
+const { normalizeFieldType, normalizeEnumValues, splitList } = require('../lib/field-schema');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 /* 落盘前后对账：样式 id / 参数 key / 字段 key 的增删摘要 */

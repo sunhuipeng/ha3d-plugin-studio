@@ -327,8 +327,7 @@ function splitGlbOne(buf, baseName, nodeName) {
   return [{ file, node: target.name, data: buildGlb([target], remap([target])) }];
 }
 
-module.exports = {
-  splitGlb, splitGlbOne,
-  /* 供 glb-info.js 复用：GLB 容器解析 + 列主序矩阵工具（同一份口径，别再写第二套） */
-  parseGlb, MAT4_IDENT, mat4FromTRS, mat4Mul, transformPoint,
-};
+/* 拆分必须在服务端做：逐顶点烘焙世界变换后再写出新的 .glb。
+ * 这里解析顶点是「生产新文件」，不向 AI / 前端返回任何顶点信息，符合 GLB 边界；
+ * 设备/背景插件编辑页「部件」面板的拆分按钮也走这套实现（routes/models.js）。 */
+module.exports = { splitGlb, splitGlbOne };

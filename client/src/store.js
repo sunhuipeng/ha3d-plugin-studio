@@ -9,7 +9,7 @@
  *   const { project, ui, assets } = useStudio();   // 或单独 import 某个 Store
  */
 export {
-  DEVICE_TYPES, WALL_TYPES, OPENING_TYPES, MODEL_TYPES, isWallType,
+  DEVICE_TYPES, WALL_TYPES, FURN_TYPES, OPENING_TYPES, MODEL_TYPES, isWallType, isFurnType,
   OPTION_TYPES, ENTITY_DOMAINS,
 } from './lib/constants';
 

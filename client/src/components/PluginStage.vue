@@ -17,6 +17,8 @@ import { ThreeHost, VIEW_PRESETS } from '../engine/three-host';
 import { PluginPreview } from '../engine/plugin-preview';
 import { normalizeOptions } from '../option-schema';
 import PlanInset from './PlanInset.vue';
+import CardView from './common/cards/CardView.vue';
+import { useCards } from '../composables/useCards';
 
 /* 预览视角固定四分之三（iso）；MCP 的 view/screenshot 参数仍可临时指定其他视角 */
 const mount = ref(null);
@@ -44,6 +46,11 @@ const entities = ref([]);
 let host = null;
 let preview = null;
 let disposed = false;
+let unHa = null;   // mock-ha 状态广播的取消订阅
+
+/* 卡片只读预览：结构树只在渲染/重生后重建，值树随 mock 状态广播刷新。
+   getPreview 传 getter —— PluginPreview 是引擎侧对象，不能进 reactive state。 */
+const { view: cardView, power: cardPower, cardKey, rebuild: rebuildCard } = useCards(() => preview);
 
 /* 样式列表与当前样式：读引擎运行后的内存镜像（AI 代码声明什么就显示什么），
  * 没渲染过 / 渲染失败时由 engineList 回落项目配置 */
@@ -62,6 +69,8 @@ const pluginType = computed(() =>
 /* 门/窗没有「主实体」：状态全部来自字段（门磁 / 开门比例），
    引擎把 entityId 指向门磁字段只为了让插件能跑，面板上不显示成主实体 */
 const isWall = computed(() => pluginType.value === 'door' || pluginType.value === 'window');
+/* 动态家具（type:'furniture'）：没有主实体、缺省无 3D 标签、贴地 */
+const isFurn = computed(() => pluginType.value === 'furniture');
 /* 门的离地高度固定 0（贴地不可调），窗可以调 */
 const isDoor = computed(() => pluginType.value === 'door');
 /* 背景插件：左下角卡片换成「安全范围」参数 —— 长×宽（米），可输入 / 滚轮快速调整 */
@@ -292,6 +301,7 @@ async function refreshOpts() {
     entities.value = preview.listEntities();
     ui.previewStatus = st;
     applyStyleMetaToPreview();
+    rebuildCard();   // 快速重生换了 def/obj/style，卡片结构重建
   } catch (e) {
     /* respawn 失败（def 已失效等）→ 全量渲染兜底 */
     return refresh(view.value);
@@ -304,8 +314,8 @@ function castChoice(o, v) {
 }
 const shownEntities = computed(() => {
   const list = entities.value || [];
-  /* 门窗的 entityId 只是门磁别名；背景没有「主实体」概念，只显示 fields 绑定的实体 */
-  return (isWall.value || isBg.value) ? list.filter((e) => e.role !== 'main') : list;
+  /* 门窗的 entityId 只是门磁别名、家具没有主实体；背景也没有「主实体」概念，只显示 fields 绑定的实体 */
+  return (isWall.value || isFurn.value || isBg.value) ? list.filter((e) => e.role !== 'main') : list;
 });
 
 /* 插件自己算出来的状态文案（门插件：已关闭 / 开 50% / 已打开） */
@@ -343,6 +353,7 @@ async function refresh(viewName, opts) {
     project.syncEngineMirror(preview);   // 内存镜像换到新 def：UI（胶囊/面板/卡片）从现在起读引擎数据
     syncStyleMeta();
     applyStyleMetaToPreview();   // 重建后把卡片上的 z / 标签高度再贴回预览样式，重新渲染不回弹
+    rebuildCard();               // 代码/def 换了，卡片结构重建（值仍靠 entityVersion 刷新）
     return st;
   } catch (e) {
     err.value = e.message || String(e);
@@ -475,6 +486,13 @@ function initHost() {
   host.setGrid(grid.value);
   host.setAxes(axes.value);
   preview = new PluginPreview(host);
+  /* mock 实体状态广播：左下实体面板 + 卡片值树的统一刷新入口。
+     MCP studio_set_entity / 点模型 / 点实体值三条路径都会触发，不再靠散落的手动赋值。 */
+  unHa = preview.ha.on(() => {
+    if (disposed || !preview) return;
+    entities.value = preview.listEntities();
+    ui.bumpEntityVersion();
+  });
 
   /* 设备标签：每帧把锚点投影到屏幕，移动 DOM（文案变了才改 innerText） */
   host.addTick(() => updateLabelDom());
@@ -535,6 +553,7 @@ onMounted(async () => {
       const st = await preview.respawn(Object.assign({ styleId: project.styleId }, o || {}));
       entities.value = preview.listEntities();
       ui.previewStatus = st;
+      rebuildCard();
       return st;
     },
     screenshot: (o) => host.snapshot(o || {}),
@@ -575,6 +594,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  if (unHa) { try { unHa(); } catch (e) { /* ignore */ } unHa = null; }
   if (viewportApi.pluginPreview) delete viewportApi.pluginPreview;
   try { if (preview) preview.destroy(); } catch (e) { /* ignore */ }
   try { if (host) host.dispose(); } catch (e) { /* ignore */ }
@@ -664,7 +684,8 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
               @wheel.prevent="wheelMeta('z', $event)">m</label>
           </span>
         </div>
-        <div class="pv-ent pv-ent-safe" title="标签高度（米）：状态标签相对设备接地点的距地高度；清空 = 贴在模型顶面">
+        <!-- 家具（type:'furniture'）缺省不显示 3D 标签，标签高度没有意义，不显示 -->
+        <div v-if="!isFurn" class="pv-ent pv-ent-safe" title="标签高度（米）：状态标签相对设备接地点的距地高度；清空 = 贴在模型顶面">
           <span class="pv-ent-name">标签高度</span>
           <span class="pv-safe-inputs">
             <label class="pv-safe-item"><input class="pv-safe-num" type="number" min="0" max="10" step="0.05"
@@ -772,6 +793,19 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
 
     <!-- 右上角 2D 平面预览（背景插件没有 plan2d，隐藏） -->
     <PlanInset v-if="!isBg" class="pv-plan" />
+
+    <!-- 卡片只读预览：紧贴平面预览下方，宽度与 home 编辑页一致（320px）。
+         仅设备类显示；纯造型家具 / 背景 / 家具包没有实体契约，不出卡。
+         ⚠ 控件 act 事件刻意不接：这里只展示 cards() 在不同 mock 状态下的样子，
+         不会真的控制设备（左下「实体」面板才是改状态的地方）。 -->
+    <div v-if="isDevice && !isFurn" class="pv-cards">
+      <div class="pv-cards-head">
+        <span>卡片预览</span>
+        <span class="pv-cards-tag" title="只展示外观，控件点击不会改变实体状态">只读 · 点左下实体改状态</span>
+      </div>
+      <CardView v-if="cardView" :key="cardKey" :node="cardView" :power="cardPower" />
+      <div v-else class="pv-cards-empty">当前插件没有可显示的卡片</div>
+    </div>
 
     <!-- 错误 -->
     <div v-if="err" class="pv-error">

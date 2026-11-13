@@ -1,14 +1,23 @@
-/* 模型域工具：upload_model / get_model / list_models / split_model / delete_model / rename_model / fix_model_materials */
+/* 模型域工具：upload_model / get_model / list_models / split_model / delete_model / rename_model / fix_model_materials
+ *
+ * GLB 边界（2026-11-12 定）：本域只做「静态文件集合」的文件级操作 + 两类服务端写操作。
+ *   · 服务端保留：split_model（拆分，split-glb.js 需逐顶点烘焙）、fix_model_materials（修材质发黑）；
+ *     设备/背景插件编辑页的「部件」面板也走同一套 HTTP 路由，不能动。
+ *   · 服务端不再解析 GLB 内容：get_model / list_models 只返回文件信息 + 完整 url（路径），
+ *     AI 用 MCP 服务器地址拼接后自行下载；节点树 / 顶点 / 包围盒 / 尺寸 / 材质明细在本地用
+ *     Python 或 Node.js 直接解析（零依赖读二进制容器，不引 three.js 等第三方库，见 H.GLB_PARSE）。
+ *   · MCP 不写任何本机文件：没有 saveTo 参数，也不复制 glb 到磁盘。
+ *   · 删除模型只对插件项目开放；家具包请用 tools-catalog.js 的 studio_delete_catalog_items（要同步维护 catalog.items）。
+ */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { z } = require('zod');
-const { modelsDir, ensureDir, readProject, writeProject } = require('../config');
-const { splitGlb, splitGlbOne } = require('../split-glb');
-const { fixGlbMaterials } = require('../fixglb');
-const hub = require('../ws-hub');
+const { modelsDir, ensureDir, readProject } = require('../lib/config');
+const { splitGlb, splitGlbOne } = require('../lib/split-glb');
+const { fixGlbMaterials } = require('../lib/fixglb');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 function register(server) {
@@ -41,18 +50,23 @@ function register(server) {
 
   server.tool(
     'studio_get_model',
-    '把项目内 models/ 目录的 glb 模型导出（复制）到本机文件系统并返回绝对路径 + 结构摘要（网格/节点/材质/动画数、包围盒尺寸），AI 拿到路径后可用本地脚本深入分析模型（尺寸、顶点、部件拆解等）；detail=true 再附深度解析（节点树/逐 primitive 属性/材质贴图明细/世界包围盒实测 w·d·h）',
+    '取项目内 models/ 目录某个 glb 的**下载地址 + 文件基本信息**（字节数 / 魔数校验 / 完整 url）。'
+    + '返回的 url 是完整路径（如 /api/projects/<projectId>/models/frame.glb），不含 http:// 主机与端口——'
+    + '**把它拼到你连接 MCP 服务器的地址后面，用 curl / 本地脚本直接下载这个 .glb**。'
+    + 'MCP 本身不写任何本机文件（没有 saveTo 参数）。'
+    + '服务端不解析 GLB 内容：节点树、顶点/三角面、包围盒 w·d·h、材质贴图、动画等详细数据，'
+    + '都下载到本机后用 Python 或 Node.js 自己解析（GLB = 12 字节头 + JSON chunk + BIN chunk，读 accessors 即可，'
+    + '零依赖，不要引入 three.js 等第三方库）；'
+    + '改好的模型用 studio_upload_model 覆盖上传（家具包用 studio_upload_catalog_model）',
     {
       projectId: z.string().optional(),
       file: z.string().describe('模型文件名（见 studio_get_project 返回的 models[].file，如 frame.glb）'),
-      saveTo: z.string().optional().describe('导出目标：目录（可以不存在，如 /tmp/models，会自动建）或完整文件路径（如 /tmp/models/frame.glb）；省略时存到系统临时目录 ha3d-models/<projectId>/ 下'),
-      detail: z.boolean().optional().describe('是否附带 GLB 深度解析明细（容器/节点树/材质/贴图/动画/扩展/世界包围盒实测尺寸），默认 false'),
     },
-    async ({ projectId, file, saveTo, detail }) => {
+    async ({ projectId, file }) => {
       try {
         const pid = H.requirePid(projectId);
         const name = path.basename(String(file || ''));
-        if (!name || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/i.test(name)) {
+        if (!name || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
           throw new Error('file 参数不合法（只取文件名，防目录穿越）: ' + name);
         }
         const src = path.join(modelsDir(pid), name);
@@ -60,39 +74,22 @@ function register(server) {
           const have = H.modelsWithSize(pid).map((m) => m.file).join(', ') || '（无）';
           throw new Error('模型不存在: ' + name + '（该项目现有: ' + have + '）');
         }
-        /* 解析导出目标：目录 → 追加文件名；否则按完整路径。
-         * 目录判定（宽松）：已存在的目录 / 以分隔符结尾 / 没有扩展名 / 扩展名不是模型后缀。
-         * 否则 AI 传 /tmp/modeldump 这种「想当目录用的路径」会被写成无后缀文件。 */
-        let dest;
-        if (saveTo) {
-          const abs = path.resolve(saveTo);
-          const ex = path.extname(abs).toLowerCase();
-          const isDir = /[\\/]$/.test(String(saveTo))
-            || (fs.existsSync(abs) && fs.statSync(abs).isDirectory())
-            || !ex
-            || !/^\.(glb|gltf|bin)$/.test(ex);
-          dest = isDir ? path.join(abs, name) : abs;
-        } else {
-          dest = path.join(os.tmpdir(), 'ha3d-models', pid, name);
-        }
-        ensureDir(path.dirname(dest));
-        fs.copyFileSync(src, dest);
-
         const buf = fs.readFileSync(src);
-        const row = {
+        const isGlb = buf.length >= 12 && buf.readUInt32LE(0) === 0x46546c67;
+        const url = `/api/projects/${pid}/models/${encodeURIComponent(name)}`;
+        return H.text({
           ok: true,
           projectId: pid,
           file: name,
-          savedTo: dest,
+          url,
           bytes: buf.length,
-          glb: H.glbSummary(buf),
-        };
-        /* 深度明细与家具项目的 studio_get_catalog_item 共用同一份解析器 */
-        if (detail) {
-          try { row.glbDetail = H.glbDetail(buf); }
-          catch (e) { row.glbDetail = { error: e.message }; }
-        }
-        return H.text(row);
+          format: isGlb ? 'glb' : 'unknown',
+          hint: isGlb
+            ? '把 url 拼到你连接的 MCP 服务器地址后即可下载该 .glb；MCP 不写本机文件。'
+              + '下载后用 Python 或 Node.js 自己解析（12 字节头 + JSON chunk + BIN chunk，读 accessors 拿节点树/包围盒/材质，'
+              + '零依赖即可，不要引入 three.js 等第三方库）；解析出的节点名可用于 studio_split_model 的 node 参数'
+            : '文件头不是 GLB 魔数：可能不是有效 glb，下载后请用 Python / Node.js 自行核对文件内容',
+        });
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -101,16 +98,17 @@ function register(server) {
 
   server.tool(
     'studio_list_models',
-    '列出当前项目 models/ 里的全部模型（不传 projectId 就是当前打开的项目）：文件名、大小、更新时间、被代码引用的行数；withSummary=true 时再附 glb 结构摘要（mesh/节点/材质数 + 包围盒尺寸）。上传、删除、改名前后对账用',
+    '列出当前项目 models/ 里的全部模型（不传 projectId 就是当前打开的项目）：文件名、大小、更新时间、被代码引用的行数、HTTP URL。'
+    + '只返回文件信息，不解析 GLB 内容；每项都带完整 url 路径，拼上 MCP 服务器地址即可下载，'
+    + '需要结构/包围盒/材质时下载后用 Python 或 Node.js 自己解析（零依赖，不要引入 three.js 等第三方库）。上传、删除、改名前后对账用',
     {
       projectId: z.string().optional(),
-      withSummary: z.boolean().optional().describe('是否解析 glb 结构（默认 false；模型多/大时慢，最多解析前 20 个）'),
     },
-    async ({ projectId, withSummary }) => {
+    async ({ projectId }) => {
       try {
         const pid = H.requirePid(projectId);
         const code = String(readProject(pid).customJs || '');
-        const files = H.modelsWithSize(pid).map((m, i) => {
+        const files = H.modelsWithSize(pid).map((m) => {
           const abs = path.join(modelsDir(pid), m.file);
           const st = fs.statSync(abs);
           const refs = code.split('\n').filter((l) => l.includes(m.file)).length;
@@ -121,15 +119,6 @@ function register(server) {
             codeRefs: refs,
             url: `/api/projects/${pid}/models/${encodeURIComponent(m.file)}`,
           };
-          /* 摘要最多解析前 20 个，避免一次读几十个大文件把工具卡住 */
-          if (withSummary && i < 20) {
-            try {
-              row.glb = (() => {
-                const g = H.glbSummary(fs.readFileSync(abs));
-                return { meshes: g.meshes, nodes: g.nodes, materials: g.materials, animations: g.animations, size: g.bbox && g.bbox.size };
-              })();
-            } catch (e) { row.glb = { error: e.message }; }
-          }
           return row;
         });
         return H.text({
@@ -154,7 +143,7 @@ function register(server) {
     {
       projectId: z.string().optional(),
       file: z.string().describe('要拆的模型文件名，如 door.glb'),
-      node: z.string().optional().describe('只导出这个顶层节点（节点名见 studio_get_model 返回的 nodeList[].name）；省略 = 全部拆开'),
+      node: z.string().optional().describe('只导出这个顶层节点：节点名按 studio_get_model 的 url 下载 glb 后，用 Python 或 Node.js 读 nodes[].name 得到（零依赖，不要引 three.js 等第三方库）；也可在编辑页「部件」面板查看；省略 = 全部拆开'),
     },
     async ({ projectId, file, node }) => {
       try {
@@ -193,7 +182,8 @@ function register(server) {
 
   server.tool(
     'studio_delete_model',
-    '删除项目 models/ 里的模型文件（试错上传的、拆分剩下的都可清）。会先扫一遍代码，把仍在引用该文件的代码行一起返回，避免删完留下死引用',
+    '删除插件项目 models/ 里的模型文件（试错上传的、拆分剩下的都可清）。会先扫一遍代码，把仍在引用该文件的代码行一起返回，避免删完留下死引用。'
+    + '**家具包项目请用 studio_delete_catalog_items**（删家具还要同步维护 catalog.items）',
     {
       projectId: z.string().optional(),
       file: z.string().describe('要删除的模型文件名，如 old.glb'),
@@ -201,6 +191,11 @@ function register(server) {
     async ({ projectId, file }) => {
       try {
         const pid = H.requirePid(projectId);
+        const proj = readProject(pid);
+        if ((proj.plugin || {}).kind === 'catalog') {
+          return H.fail('家具包项目不能用 studio_delete_model（只删文件会让 catalog.items 留下失效条目）。'
+            + '请用 studio_delete_catalog_items {itemIds:[...]} 按家具条目删除');
+        }
         const name = path.basename(String(file || ''));
         if (!/\.glb$/i.test(name)) throw new Error('仅支持 .glb 文件: ' + name);
         const target = path.join(modelsDir(pid), name);
@@ -336,45 +331,35 @@ function register(server) {
    * 插件项目只删文件，并把代码里仍引用该文件的位置一并返回。 */
   server.tool(
     'studio_delete_models',
-    '一次删除项目 models/ 里指定的多个模型文件（files 数组，重复/不存在的会被去重或报告，不会中断整批）。'
-    + '插件项目：只删文件，返回每个文件在代码里的引用行（codeRefs），提醒改代码。'
-    + '家具包项目（catalog）：默认连引用这些模型的家具条目一起移除；也可用 itemIds 按清单条目 id 指定要删的模型。'
-    + 'removeCatalogItems=false 只删文件（会留下失效条目并给出警告）；dryRun=true 只返回删除计划、不落盘',
+    '一次删除插件项目 models/ 里指定的多个模型文件（files 数组，重复/不存在的会被去重或报告，不会中断整批）。'
+    + '**只服务插件编辑页（设备 / 背景插件）**：只删文件，返回每个文件在代码里的引用行（codeRefs）提醒改代码。'
+    + '家具包项目（kind: catalog）请改用 studio_delete_catalog_items——删家具时除了模型文件，'
+    + '还要同步维护 project.json 里的 catalog.items，本工具不做这件事，所以会直接拒绝。'
+    + 'dryRun=true 只返回删除计划、不落盘',
     {
       projectId: z.string().optional(),
       files: z.array(z.string()).optional().describe('要删除的模型文件名数组，如 ["a.glb","b.glb"]'),
-      itemIds: z.array(z.string()).optional().describe('家具包专用：按清单条目 id 指定，自动解析成对应模型文件'),
-      removeCatalogItems: z.boolean().optional().describe('家具包默认 true：同时移除引用这些模型的清单条目'),
-      dryRun: z.boolean().optional().describe('默认 false；true 只返回计划，不删文件也不改配置'),
+      dryRun: z.boolean().optional().describe('默认 false；true 只返回计划，不删文件'),
     },
-    async ({ projectId, files, itemIds, removeCatalogItems, dryRun }) => {
+    async ({ projectId, files, dryRun }) => {
       try {
         const pid = H.requirePid(projectId);
         const proj = readProject(pid);
-        const kind = (proj.plugin || {}).kind || 'device';
-        const items = (proj.catalog && Array.isArray(proj.catalog.items)) ? proj.catalog.items : [];
+        if ((proj.plugin || {}).kind === 'catalog') {
+          return H.fail('家具包项目不能用 studio_delete_models（只删模型文件会让 catalog.items 留下失效条目）。'
+            + '请用 studio_delete_catalog_items {itemIds:[...]} 按家具条目删除，它会同步维护清单与模型文件');
+        }
         const dir = modelsDir(pid);
-
-        /* 汇总待删文件名：files + itemIds 解析出来的 model，去重、挡目录穿越 */
         const requested = [];
         const invalid = [];
-        const missingItems = [];
         for (const raw of (Array.isArray(files) ? files : [])) {
           const name = path.basename(String(raw || '').trim());
           if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.glb$/i.test(name)) { invalid.push(String(raw)); continue; }
           if (!requested.includes(name)) requested.push(name);
         }
-        for (const rawId of (Array.isArray(itemIds) ? itemIds : [])) {
-          const id = String(rawId || '');
-          const it = items.find((x) => x && x.id === id);
-          if (!it) { missingItems.push(id); continue; }
-          const name = path.basename(String(it.model || ''));
-          if (name && !requested.includes(name)) requested.push(name);
-        }
         if (!requested.length) {
-          return H.fail('没有可删除的模型：请传 files（多个文件名）或 itemIds（家具条目 id）。'
-            + (invalid.length ? ` 非法文件名：${invalid.join(', ')}` : '')
-            + (missingItems.length ? ` 找不到的条目：${missingItems.join(', ')}` : ''));
+          return H.fail('没有可删除的模型：请传 files（多个文件名）。'
+            + (invalid.length ? ` 非法文件名：${invalid.join(', ')}` : ''));
         }
 
         /* 先算完整计划再动手：缺文件 / 非法名都只是逐条报告，不影响其它文件 */
@@ -386,33 +371,20 @@ function register(server) {
           const refs = exists ? H.codeRefLines(pid, name) : [];
           if (refs.length) codeRefs[name] = refs;
           plan.push({
-            file: name,
-            exists,
+            file: name, exists,
             bytes: exists ? fs.statSync(abs).size : 0,
-            referencedBy: items.filter((x) => x && x.model === name).map((x) => x.id),
             codeRefs: refs.length,
             action: exists ? 'delete' : 'notFound',
           });
         }
         const toDelete = plan.filter((p) => p.action === 'delete').map((p) => p.file);
         const notFound = plan.filter((p) => p.action === 'notFound').map((p) => p.file);
-        const removeItems = kind === 'catalog' && removeCatalogItems !== false;
-        const hitItems = items.filter((x) => x && requested.includes(x.model));
-        const removedItems = removeItems
-          ? hitItems.map((x) => ({ id: x.id, name: x.name, model: x.model }))
-          : [];
-        const orphanItems = (kind === 'catalog' && !removeItems) ? hitItems.map((x) => x.id) : [];
-        const remainingItems = removeItems
-          ? items.filter((x) => !(x && requested.includes(x.model)))
-          : items;
 
         if (dryRun) {
           return H.text({
-            ok: true, dryRun: true, projectId: pid, kind,
-            plan, toDelete, notFound, invalid, missingItems,
-            removedItems, orphanItems, codeRefs,
-            remainingItemCount: remainingItems.length,
-            hint: '这是预演：没有删任何文件、也没有改配置；去掉 dryRun 才会真正执行',
+            ok: true, dryRun: true, projectId: pid,
+            plan, toDelete, notFound, invalid, codeRefs,
+            hint: '这是预演：没有删任何文件；去掉 dryRun 才会真正执行',
           });
         }
 
@@ -421,32 +393,17 @@ function register(server) {
           fs.unlinkSync(path.join(dir, name));
           deleted.push(name);
         }
-        let notified = false;
-        if (kind === 'catalog' && removeItems) {
-          proj.catalog ||= {};
-          proj.catalog.items = remainingItems;
-          writeProject(pid, proj);
-          notified = hub.notify(pid, { type: 'refresh', what: 'catalog', files: deleted, bump: deleted.length > 0 });
-        } else {
-          notified = hub.notify(pid, { type: 'refresh', what: 'models', files: deleted });
-        }
-
+        const notified = hub.notify(pid, { type: 'refresh', what: 'models', files: deleted });
         return H.text({
-          ok: true,
-          projectId: pid, kind,
-          requested, deleted, notFound, invalid, missingItems,
-          removedItems, orphanItems, codeRefs,
-          remaining: { models: H.modelsOut(pid), itemCount: remainingItems.length, items: remainingItems },
-          notified,
+          ok: true, projectId: pid,
+          requested, deleted, notFound, invalid, codeRefs,
+          remaining: H.modelsOut(pid), notified,
           warning: [
-            orphanItems.length ? `有 ${orphanItems.length} 件家具仍指向已删除的模型：${orphanItems.join(', ')}（预览/发布会失败）` : '',
             Object.keys(codeRefs).length ? `代码里仍有引用：${Object.keys(codeRefs).join(', ')}，详见 codeRefs` : '',
             notFound.length ? `未找到：${notFound.join(', ')}` : '',
             invalid.length ? `文件名不合法已跳过：${invalid.join(', ')}` : '',
           ].filter(Boolean).join('；'),
-          hint: kind === 'catalog'
-            ? '模型文件与引用它们的家具条目已一起删除，编辑页会自动刷新清单'
-            : '模型文件已删除；如 codeRefs 非空，请改掉代码里的引用再提交',
+          hint: '模型文件已删除；如 codeRefs 非空，请改掉代码里的引用再提交',
         });
       } catch (e) { return H.fail(e.message); }
     },

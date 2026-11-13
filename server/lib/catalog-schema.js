@@ -5,13 +5,13 @@
  * 描述（名称 / 分类 / 尺寸 / 兜底色 / 2D 图标）。导出时按 ha-3d-home 的家具包格式打包：
  *   item.json（kind + id(=项目id) + items 数组）+ 各条引用的 .glb 平铺
  *
- * 只放纯函数（不碰磁盘），便于 config / routes / catalog-pkg 三处共用同一套口径。
+ * 只放纯函数（不碰磁盘），便于 config / 各路由域 / catalog-pkg 共用同一套口径。
  */
 'use strict';
 
 /* 家具分类：唯一出处是 ha-3d-home 的 assets/catalog.json 的 types。
  * studio 不能读那个文件，所以这里是一份兜底副本；配置了 home 地址时前端会走
- * GET /api/catalog-types 取 home 的真实枚举覆盖它（见 routes.js / 前端 CatalogEditor）。 */
+ * GET /api/catalog-types 取 home 的真实枚举覆盖它（见 meta.js / 前端 CatalogEditor）。 */
 const FALLBACK_TYPES = ['sofa', 'bed', 'table', 'cabinet', 'kitchen', 'bath', 'deco', 'other'];
 
 /* type 中文说明（前端下拉显示用，与 home 文档里的分类含义一致） */
@@ -160,7 +160,7 @@ function buildCatalogManifest(proj, bump) {
 }
 
 module.exports = {
-  FALLBACK_TYPES, TYPE_LABELS, ITEM_ID_RE, DEF_COLOR,
+  FALLBACK_TYPES, TYPE_LABELS, ITEM_ID_RE,
   slugOf, uniqueId, itemDef, normalizeCatalog, newCatalogProject,
-  validateCatalog, bumpVersion, buildCatalogManifest,
+  validateCatalog, buildCatalogManifest,
 };

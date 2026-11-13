@@ -4,15 +4,32 @@
 const http = require('http');
 const fs = require('fs');
 const express = require('express');
-const { PORT, CLIENT_DIST, PROJECTS_DIR, ensureDir, remoteTarget } = require('./config');
-const { api } = require('./routes');
-const { attach: attachHub } = require('./ws-hub');
-const { mountMcpSse } = require('./mcp-sse');
+const { PORT, CLIENT_DIST, PROJECTS_DIR, ensureDir, remoteTarget } = require('./lib/config');
+const systemRoutes = require('./routes/system');
+const metaRoutes = require('./routes/meta');
+const projectRoutes = require('./routes/projects');
+const modelRoutes = require('./routes/models');
+const publishRoutes = require('./routes/publish');
+const { attach: attachHub } = require('./lib/ws-hub');
+const { mountMcpSse } = require('./mcp/sse');
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
-/* 健康检查（docker healthcheck / 探活用，同 ha-3d-home 的 /api/health） */
-app.get('/api/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
+/* 按域挂载路由（同 ha-3d-home 的 server 拆域口径：routes/ 下每个域文件自带 Router）：
+ *   routes/system.js    /api/health
+ *   routes/meta.js      /api/target、/api/mcp-config、/api/home/house、/api/catalog-types
+ *   routes/projects.js  /api/projects…（CRUD / 导入 / 复制 / 预览图）
+ *   routes/models.js    /api/projects/:id/models…（GLB 上传下载 / 拆分 / 修材质）
+ *   routes/publish.js   /api/projects/:id/build|export*|publish*（生成 / 导出 / 发布）
+ * 工具 / 公用类在 lib/，MCP（SSE 端点 + 工具）在 mcp/。
+ */
+const api = express.Router();
+api.use(systemRoutes());
+api.use(metaRoutes());
+api.use(projectRoutes());
+api.use(modelRoutes());
+api.use(publishRoutes());
 app.use('/api', api);
 mountMcpSse(app);
 

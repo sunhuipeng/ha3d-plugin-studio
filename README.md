@@ -6,7 +6,7 @@
 
 ## 核心能力
 
-### 1. MCP 能力（30 个工具）
+### 1. MCP 能力（42 个工具）
 
 服务内置 MCP Server（SSE 传输），连接地址：
 
@@ -14,7 +14,11 @@
 http://localhost:8098/mcp/sse
 ```
 
-在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。工具一览（按用途排列）：
+在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。启动页右下角的 **⛓ MCP 接入** 按钮会展示 `mcpServers` 配置供一键复制 —— 这份 JSON 由服务端 `GET /api/mcp-config` 拼装（端口取启动时的 `PORT`、主机名取请求 Host；开发模式下前端在 Vite 端口，接口会自动换回服务端口），客户端不写死任何端口。
+
+> 42 个工具各自的实现归属（纯服务端 / 纯前端 / 前后端协作）见 [MCP-ARCHITECTURE.md](./MCP-ARCHITECTURE.md)。
+
+工具一览（按用途排列）：
 
 **配置读取**
 
@@ -39,10 +43,10 @@ http://localhost:8098/mcp/sse
 | `studio_set_style` | 切换样式，验证多造型 |
 | `studio_set_option` | 调节样式参数取值（等价拖左下卡片滑条）：改 `options[].def` 后重跑代码出图，返回改前/改后值 + 引擎实际吃到的 `ctx.options`；不传 `key` 只读当前参数值，供 AI 自动核验参数效果 |
 | `studio_upload_model` | 上传 GLB 模型到项目模型库 |
-| `studio_list_models` | 列出当前项目的模型：大小、更新时间、代码引用条数、可选结构摘要 |
-| `studio_get_model` | 把项目里的 GLB 导出到本机（返回绝对路径 + 结构摘要：mesh/材质/动画数、包围盒、逐 mesh 尺寸、顶层节点名），便于 AI 本地量尺寸、拆部件 |
-| `studio_split_model` | 按顶层节点把 GLB 拆成多个独立部件模型（顶点已烘焙世界变换） |
-| `studio_delete_model` | 删除模型文件，并返回仍在引用它的代码行 |
+| `studio_list_models` | 列出当前项目的模型：大小、更新时间、代码引用条数、HTTP URL（不解析 GLB 内容） |
+| `studio_get_model` | 返回该 GLB 的**完整 `url` 路径** + 字节数 / 魔数校验；AI 把 `url` 拼到 MCP 服务器地址后自行下载，节点树、顶点、包围盒、尺寸、材质明细由 AI 下载后用 Python / Node.js 直接解析（零依赖，不引 three.js 等第三方库）。MCP 不写本机文件 |
+| `studio_split_model` | 按顶层节点把 GLB 拆成多个独立部件模型（顶点已烘焙世界变换，**服务端执行**） |
+| `studio_delete_model` | 删除**插件项目**的模型文件，并返回仍在引用它的代码行；家具包请改用 `studio_delete_catalog_items` |
 | `studio_rename_model` | 重命名模型文件，并返回仍在用旧文件名的代码行 |
 | `studio_fix_model_materials` | 修复 GLB 材质发黑（sRGB 未转 / metallic 偏高 /  roughness 偏低 / 压暗扩展）；**原地改写不留备份**（幂等可反复跑），`dryRun` 只体检 |
 | `studio_get_runtime` | 运行期体检：渲染错误、当前样式与参数实际取值、实体状态、引擎实例数、浏览器控制台报错（含被引擎吞掉的 `update` 异常） |
@@ -52,6 +56,23 @@ http://localhost:8098/mcp/sse
 
 > 项目 id 可省略：自动使用当前打开了编辑页的项目。截图 / 写码立即运行等前端中继工具依赖浏览器打开着编辑页。
 > **同时开了多个标签页时，先 `studio_single_window` 收敛成一个再动手** —— 否则截图、调参、写码可能落到不同标签页，看到的画面和代码对不上。
+
+#### GLB 处理边界（2026-11-12 起）
+
+服务端把项目里的 GLB 当作**静态文件集合**管理，**只在两类写操作里解析 GLB**：
+
+| 保留在服务端 | 为什么必须服务端 | 谁在用 |
+| --- | --- | --- |
+| `studio_split_model` / `POST .../split` | 按节点拆分要逐顶点烘焙世界变换并写出新 `.glb` | MCP + 设备/背景插件编辑页「部件」面板 |
+| `studio_fix_model_materials` / `POST .../fix-materials` | 原地改写 `materials`（sRGB / metallic / roughness / 压暗扩展） | MCP + 两个编辑页的「修复材质」按钮 |
+
+其余一律**不在服务端解析、也不返回**顶点 / 节点树 / 包围盒 / 尺寸 / 材质明细：
+
+1. **列 / 基本信息**：`studio_list_models` 给 `models/` 目录的文件全量（含未被家具引用的孤儿）；`studio_list_catalog_items` **只返回 `items` 数组**，每项含家具全量属性 + `modelFile`；`studio_get_catalog_item` 的单件详情在 `model` 里给 `url`。这些结果里的 `url` 都是完整路径（`/api/projects/<id>/models/xxx.glb`），不含主机与端口；`item.model` 始终是纯文件名，不能把 `url` 回填进去。
+2. **下载到本机**：**AI 自己把 `url` 拼到 MCP 服务器地址后面**（如 `curl http://<mcp-server>/api/projects/<id>/models/xxx.glb -o xxx.glb`），MCP 侧没有任何 `saveTo` 参数、不写本机文件。整包交付走 `studio_export_catalog` 返回的 `zipBase64`，由 AI 解码落盘。
+3. **AI 自己解析**：下载到本机后，用 **Python 或 Node.js 直接解析**——GLB 就是个二进制容器（12 字节头 + JSON chunk + BIN chunk），读 `accessors` 就能拿到节点树、包围盒 `w·d·h`、材质贴图，**标准库就够，零依赖**。不要引 three.js / gltf-transform / trimesh 之类的第三方库（本机不一定装得上、版本差异还会让结果不可复现）。解析出的 `nodes[].name` 可直接喂给 `studio_split_model(node)`。遇到 `extensionsRequired` 里的 Draco / meshopt / KTX2 才需要额外解码器，届时明确说明解不了即可。
+4. **写回**：家具条目的 `w/d/h` 经 `studio_upload_catalog_model(item)` 或 `studio_set_catalog_item` 写入；也可让用户在编辑页点「按模型实测」（浏览器本地算）。**按描述生成 / 修改好的新 glb 同样走「先落成本机文件 → 再上传」**，服务端不负责生成模型。
+5. **编辑页兼容**：设备 / 背景插件编辑页的「部件」面板（上传 / 列模型 / 节点树 / 缩略图 / 拆分 / 修材质）功能不变——节点树、缩略图、包围盒与顶点统计本来就在浏览器端用 `GLTFLoader` / `THREE.Box3` 本地解析，只有拆分与修材质走上面两条服务端路由。
 
 ### 2. 接入 WorkBuddy 快速零代码开发
 
@@ -128,16 +149,19 @@ AI 生成的 `plugin.js` 里常把 `styles` / `options` 写死（生成那一刻
 
   | 工具 | 作用 |
   | --- | --- |
-  | `studio_list_catalog_items` | 列出当前页全部家具（属性 + 模型文件信息 + 可选 GLB 摘要），`saveTo` 可把全部 `.glb` 导出到本机；附分类、未引用模型、校验结果、item.json 预览 |
-  | `studio_get_catalog_item` | 单件详情：右侧面板全量属性 + GLB 深度解析（节点树 / mesh / 材质贴图 / 动画 / 扩展 / 世界包围盒实测 w·d·h），`saveTo` 导出该 GLB |
+  | `studio_list_catalog_items` | **纯列举，只返回 `items` 数组**：每条家具的全量属性 + `modelFile`（文件信息）；不写文件、不下载模型。分类查 `studio_get_catalog_types`、文件全量查 `studio_list_models`、校验结果由写操作返回 |
+  | `studio_get_catalog_item` | 单件详情（纯读）：右侧面板全量属性 + 模型文件信息（`model.url` 可直接拼 MCP 服务器地址下载）+ 校验结果；不下载模型 |
   | `studio_get_catalog_types` | 读取现有家具类型（= 编辑页分类下拉全量：来自 home 的 `types`），并统计当前包各分类用了几件 |
   | `studio_set_catalog_item` | **全量属性覆盖**：`itemId + item` 单件整条替换，或 `items` 整张清单替换；`merge=true` 才增量合并；可选 `meta` 改包名/版本/说明 |
-  | `studio_upload_catalog_model` | 上传本机 GLB（可多个）+ 右侧属性配置；未给的尺寸按 GLB 实测自动填；**同名模型直接覆盖**（更新原条目，不新增重复家具） |
-  | `studio_delete_catalog_item` | 移除条目（可选连模型文件一起删；别的家具还在用该模型时会拦下） |
-  | `studio_export_catalog` / `studio_publish_catalog` | 导出家具包 zip / 发布到 ha-3d-home |
+  | `studio_upload_catalog_model` | 上传本机 GLB（可多个）+ 右侧属性配置；`w/d/h` 由调用方下载 glb 后用 Python / Node.js 解析包围盒再传入（未给用默认 `0.8×0.8×0.6`）；**同名模型直接覆盖**（更新原条目，不新增重复家具） |
+  | `studio_delete_catalog_items` | **删家具（单件 / 批量统一入口）**：按 `itemIds` 移除条目 + 默认连 `.glb` 一起删 + 同步写回 `catalog.items`；删一件就传一个 id；`deleteModel:false` 只删条目、保留模型，`dryRun:true` 预演；同名模型仍被别的家具引用时保留文件并在 `keptModels` 说明 |
+  | `studio_export_catalog` / `studio_publish_catalog` | 导出家具包（返回 `zipBase64`，AI 自行解码落盘）/ 发布到 ha-3d-home |
+  | `studio_select_catalog_item` | **切换预览目标**：选中左侧清单某一条并把它的 GLB 加载进中间 3D 预览（等价于点该行），等模型真正进场景才返回——返回 `itemId` / 名称 / 模型文件 / 实测包围盒 `size` / 相机状态。**纯 UI 状态，不落盘**；多件家具时靠它切预览，之后再调 `studio_view` / `studio_screenshot`（也可直接在两者里带 `itemId` 一步完成） |
+  | `studio_get_catalog_selection` | **读当前预览的是哪件**：`selectedItemId` / 名称 / 模型文件 / 实测尺寸 / 相机状态 + 磁盘上该条完整属性 + 整张清单概览；纯查询。多轮对话里先调它定位目标，再带 `itemId` 改 |
+  | `studio_refresh_catalog` | 让编辑页从服务器重拉清单覆盖内存（丢弃未保存改动、清模型缓存、重载预览）；不写服务器数据；无前端在线时降级返回磁盘清单 + `warning` |
 
   写操作会落盘 `project.json` 并通过 WebSocket 推 `what:'catalog'`：编辑页重拉清单、取消挂着的防抖保存（避免旧内存覆盖 AI 的改动）、刷新模型列表与 3D 预览。插件专用工具（`get_code` / `write_code` / `sync_config` / 预览中继 / 插件发布）落到家具项目时会直接指路，不会白等中继超时；`studio_get_project` 对家具项目额外返回 `catalog` 整张清单。
-  GLB 深度解析复用 `split-glb.js` 的 chunk 解析与列主序矩阵工具（同一份口径），插件页 `studio_get_model(detail=true)` 也用它。
+  服务端**不解析** GLB 内容（顶点 / 结构 / 包围盒 / 尺寸 / 材质明细一律不返回）：家具条目的 `w/d/h` 由 AI 下载 glb 后用 Python / Node.js 解析包围盒写入，或由用户在编辑页点「按模型实测」（浏览器本地 `Box3`）。详见下面「GLB 处理边界」。
 
 ### 6. 离线打包与在线安装
 
@@ -220,19 +244,29 @@ x86 目标机不适用 arm64 镜像，需要时显式 `bash scripts/push-image.s
 
 ```
 server/            Node 服务端（Express, 端口 8098）
-  index.js         入口：静态托管 client/dist + API + WS + MCP(SSE)
-  routes.js        REST API（项目 CRUD / 模型 / 构建 / 导出 / 发布 / 家具包）
-  catalog-schema.js 家具项目的数据形状 + 校验 + item.json 清单构建（纯函数）
-  catalog-pkg.js   家具包打包 + 远程发布（item.json + 多个平铺 glb）
-  catalog-types.js 家具分类枚举（优先取 home 的 /api/catalog，失败回落兜底）
-  glb-info.js      GLB 深度解析（节点树/材质/贴图/动画 + 世界包围盒实测尺寸，复用 split-glb 矩阵工具）
-  mcp/             38 个 MCP 工具（config/preview/projects/models/publish/lock/catalog + helpers）
-  mcp-tools.js     MCP 工具装配薄壳（把上面各域 register 进 server）
-  mcp-sse.js       MCP SSE 传输
-  ws-hub.js        WebSocket 中继（服务端 ↔ 浏览器编辑页）
-  plugin-pkg.js    打包 + 远程发布（HTTP 与 MCP 共用）
-  generator.js     manifest 拼装与配置校验（代码一律取 customJs）
-  config.js        路径 / 项目读写 / 远程目标配置
+  index.js         入口：按域挂载路由 + 静态托管 client/dist + WS + MCP(SSE)
+  routes/          接口类（同 ha-3d-home 拆域口径：每个域文件自带 Router，index.js 统一挂载）
+    system.js        /api/health
+    meta.js          /api/target、/api/mcp-config、/api/home/house、/api/catalog-types
+    projects.js      /api/projects…（CRUD / 导入 / 复制 / 预览图）
+    models.js        /api/projects/:id/models…（部件 GLB 上传下载 / 拆分 / 修材质）
+    publish.js       /api/projects/:id/build|export*|publish*（生成 / 导出 / 发布）
+  lib/             工具类 / 公用类（被 routes 与 MCP 共用，不挂任何路由）
+    config.js        目录/端口/数据文件 + 项目读写 + 发布目标 + safeId/safeFile/safeRemove
+    catalog-schema.js 家具项目的数据形状 + 校验 + item.json 清单构建（纯函数）
+    catalog-types.js 家具分类枚举（优先取 home 的 /api/catalog，失败回落兜底）
+    option-schema.js / field-schema.js  options / fields 字段规约
+    generator.js     plugin.js 代码生成 + 校验
+    plugin-pkg.js    插件包打包 + 远程发布
+    catalog-pkg.js   家具包打包 + 远程发布（item.json + 多个平铺 glb）
+    split-glb.js     GLB 按节点拆分
+    fixglb.js        GLB 材质修复
+    ws-hub.js        WebSocket 中继（编辑页实时预览 / MCP 推送）
+  mcp/             MCP 域（SSE 端点 + 工具装配 + 各域工具）
+    sse.js          MCP SSE 传输（/mcp/sse、/mcp/messages、/mcp/health）
+    tools.js        装配入口（注册工具）
+    tools-*.js      按域拆分：config / preview / projects / models / catalog / publish / lock
+    helpers.js      输出格式 / 项目 id 解析 / 分项输出 / 活动横条
 client/src/        前端（Vue3 + Vite）
   components/      PluginStage（3D 预览）/ RightPanel / LeftRail / Home / CatalogEditor（家具编辑页）
   engine/          plugin-engine（插件装载与运行）/ plugin-preview / three-host

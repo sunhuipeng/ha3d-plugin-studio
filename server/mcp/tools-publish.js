@@ -2,7 +2,7 @@
 'use strict';
 
 const { z } = require('zod');
-const { prepareExportZip, publishProject } = require('../plugin-pkg');
+const { prepareExportZip, publishProject } = require('../lib/plugin-pkg');
 const H = require('./helpers');
 
 function register(server) {

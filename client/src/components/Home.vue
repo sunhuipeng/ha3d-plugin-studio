@@ -3,9 +3,9 @@
  * 预览图来自 data/projects/<id>/preview.png（编辑页每次渲染成功后自动落盘，
  * 代码为空 / 报错时落盘的是白底+网格 俯视45° 占位图）；从没打开过的项目
  * 没有 preview.png（404）→ 用 CSS 画一个同款白底网格占位。 */
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Plus, Setting, Upload } from '@element-plus/icons-vue';
+import { Plus, Setting, Upload, Connection } from '@element-plus/icons-vue';
 import { useStudio } from '../stores';
 const { act, project, ui } = useStudio();
 
@@ -164,6 +164,61 @@ async function doSaveTarget() {
   catch (e) { ElMessage.error(e.message); }
 }
 
+/* ---- 右下角悬浮 MCP 接入: 配置由服务端 /api/mcp-config 生成并返回 ----
+ * 地址不在客户端拼：端口用服务启动时的 PORT（PORT 环境变量改过也对），
+ * 主机名取请求 Host；dev 下页面在 Vite 端口（只有 /api 被代理），
+ * 带 dev=1 让服务端把端口换成服务端口。服务没起来 → 状态条红 + 禁复制。 */
+const mcpVisible = ref(false);
+const mcpCopied = ref(false);
+const mcpInfo = ref(null);     // 服务端返回 { ok, port, url, config }
+const mcpHealth = ref(null);   // null=检测中 / true=在线 / false=连不上
+let copiedTimer = 0;
+const mcpText = computed(() => (mcpInfo.value ? JSON.stringify(mcpInfo.value.config, null, 2) : ''));
+/* 代码块着色：先转义 & < >，再把「键」和「字符串值」套上 class。
+ * 内容只有服务端拼出来的这几个字段，不存在外部注入面。 */
+const mcpHtml = computed(() => mcpText.value
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"([^"]+)":/g, '<span class="j-k">"$1"</span>:')
+  .replace(/: "([^"]*)"/g, ': <span class="j-s">"$1"</span>'));
+
+function openMcp() {
+  mcpVisible.value = true;
+  mcpHealth.value = null;
+  mcpInfo.value = null;
+  clearTimeout(copiedTimer);
+  mcpCopied.value = false;
+  fetch('/api/mcp-config' + (import.meta.env.DEV ? '?dev=1' : ''))
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d || !d.ok || !d.config) throw new Error('bad payload');
+      mcpInfo.value = d;
+      mcpHealth.value = true;
+    })
+    .catch(() => { mcpHealth.value = false; });
+}
+
+async function copyMcp() {
+  if (!mcpInfo.value) return;
+  const text = mcpText.value;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    /* http + 非 localhost 不是安全上下文，没有 clipboard API：退化成选中 textarea 复制 */
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (err) { /* 复制失败也不阻断，用户可手动选中 */ }
+    ta.remove();
+  }
+  mcpCopied.value = true;
+  ElMessage.success('MCP 配置已复制');
+  clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => { mcpCopied.value = false; }, 1600);
+}
+onBeforeUnmount(() => clearTimeout(copiedTimer));
+
 function fmtTime(iso) {
   try {
     const d = new Date(iso);
@@ -172,15 +227,16 @@ function fmtTime(iso) {
   } catch (e) { return iso || ''; }
 }
 
-/* ---- 卡片角标文案：设备类（device 含门/窗）、背景、家具包 ----
- * 门/窗已并入设备类（kind:'device' + type 'door'/'window'）：设备 · 门 / 设备 · 窗；
+/* ---- 卡片角标文案：设备类（device 含门/窗/家具）、背景、家具包 ----
+ * 门/窗/家具都已并入设备类（kind:'device' + type 'door'/'window'/'furniture'）：
+ * 设备 · 门 / 设备 · 窗 / 设备 · 家具；
  * 家具包显示件数（catalog.items 数量，服务端列表接口一并返回） */
 const KIND_NAMES = { device: '设备', background: '背景', catalog: '家具包' };
 const TYPE_NAMES = {
   light: '灯', switch: '开关', fan: '风扇', cover: '窗帘', climate: '空调',
   water_heater: '热水器', media_player: '音箱', vacuum: '扫地机', camera: '摄像头',
   sensor: '传感器', other: '设备',
-  door: '门', window: '窗',
+  door: '门', window: '窗', furniture: '家具',
 };
 function kindLabel(p) {
   if (p.kind === 'catalog') return '家具包 · ' + (p.items || 0) + ' 件';
@@ -240,7 +296,11 @@ function kindLabel(p) {
       </div>
     </main>
 
-    <!-- 右下角悬浮按钮组：导入项目（设置上方） -->
+    <!-- 右下角悬浮按钮组：MCP 接入 / 导入项目（设置上方） -->
+    <div class="fab fab-mcp" title="MCP 接入：复制 mcpServers 配置，让 AI 助手直接操作本项目"
+         @click="openMcp">
+      <el-icon :size="22"><Connection /></el-icon>
+    </div>
     <div class="fab fab-import" title="导入项目：选择「导出项目」生成的备份 zip，还原成一个新项目" @click="importClick">
       <el-icon :size="22"><Upload /></el-icon>
     </div>
@@ -343,6 +403,44 @@ function kindLabel(p) {
         <el-button type="primary" @click="doSaveTarget">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- MCP 接入弹窗：一键复制 mcpServers 配置（地址按当前页面自动生成） -->
+    <el-dialog v-model="mcpVisible" title="MCP 接入" width="600px">
+      <!-- 顶部状态条：服务是否在线 + 最终地址，一眼确认能不能连 -->
+      <div class="mcp-status" :class="mcpHealth === false ? 'off' : (mcpHealth ? 'on' : '')">
+        <span class="mcp-dot"></span>
+        <b>{{ mcpHealth === false ? 'MCP 服务未响应' : (mcpHealth ? 'MCP 服务在线' : '正在检测服务…') }}</b>
+        <span v-if="mcpInfo" class="mcp-addr" :title="mcpInfo.url">{{ mcpInfo.url }}</span>
+      </div>
+
+      <p class="mcp-lead">
+        把下面的配置粘贴到支持 MCP 的客户端（WorkBuddy / Cursor / Claude Desktop…），AI 就能直接调用本项目的
+        <b>studio_* 工具</b>：建项目、写插件代码、推实体状态、截图验证、发布安装，全程不用手点。
+      </p>
+
+      <div v-if="mcpInfo" class="mcp-code">
+        <div class="mcp-code-head">
+          <span class="mcp-file">mcp.json</span>
+          <button type="button" class="mcp-copy" :class="{ done: mcpCopied }" @click="copyMcp">
+            {{ mcpCopied ? '✓ 已复制' : '复制' }}
+          </button>
+        </div>
+        <pre v-html="mcpHtml"></pre>
+      </div>
+      <div v-else-if="mcpHealth === false" class="mcp-offline">
+        连不上 studio 服务。先 <code>npm start</code> 启动服务，再重新打开本弹窗。
+      </div>
+
+      <p class="mcp-note">
+        地址由服务端按启动端口自动生成 —— 换机器 / 改端口 / 走反向代理都以本页为准；连接前先 <code>npm start</code> 启动服务。
+        不登记 MCP 也能用：装 <b>ha3d-skill</b> 技能后会通过内置脚本调用同一地址。
+      </p>
+
+      <template #footer>
+        <el-button @click="mcpVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!mcpInfo" @click="copyMcp">{{ mcpCopied ? '已复制' : '复制配置' }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -412,6 +510,8 @@ function kindLabel(p) {
 .fab:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 10px 26px rgba(47,127,224,.22); }
 /* 导入项目按钮：设置按钮正上方 */
 .fab-import { bottom: 92px; }
+/* MCP 接入按钮：导入按钮正上方（三颗按钮竖排，间距 66px） */
+.fab-mcp { bottom: 158px; }
 
 .empty { text-align: center; padding: 30px 0; }
 </style>
@@ -459,4 +559,47 @@ function kindLabel(p) {
 .adv-link { margin: 0; font-size: 12px; color: var(--fg-dim); }
 .adv-link a { color: var(--accent); text-decoration: none; word-break: break-all; }
 .adv-link a:hover { text-decoration: underline; }
+
+/* MCP 接入弹窗（el-dialog 挂在 body 下，需要全局样式） */
+/* 顶部状态条：绿=在线 / 红=未响应 / 灰=检测中；右侧贴最终地址 */
+.mcp-status { display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.5;
+  background: #f2f7f3; border: 1px solid #dcebe1; color: #1f7a4d; transition: all .2s; }
+.mcp-status b { font-weight: 600; }
+.mcp-status .mcp-dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: #22a06b; box-shadow: 0 0 0 3px rgba(34,160,107,.14); }
+.mcp-status.off { background: #fdf4f3; border-color: #f3dcd9; color: #bf4038; }
+.mcp-status.off .mcp-dot { background: #d9534f; box-shadow: 0 0 0 3px rgba(217,83,79,.14); }
+.mcp-status:not(.on):not(.off) { background: #f5f7fa; border-color: #e5eaf1; color: #6b7a8f; }
+.mcp-status:not(.on):not(.off) .mcp-dot { background: #b6c2d2; box-shadow: none; }
+.mcp-addr { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: #5b6b80; }
+
+.mcp-lead { margin: 0 0 14px; font-size: 12.5px; line-height: 1.75; color: #4a5a6e; }
+.mcp-lead b { color: var(--fg); font-weight: 600; }
+
+/* 代码块：文件头一条 + 浅色底，复制按钮放文件头里，不压代码 */
+.mcp-code { border: 1px solid #e2e8f1; border-radius: 12px; overflow: hidden; background: #f8fafd; }
+.mcp-code-head { display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 10px 7px 14px; background: #eef3fa; border-bottom: 1px solid #e2e8f1; }
+.mcp-file { font-size: 11.5px; color: #6b7a8f; letter-spacing: .02em; }
+.mcp-code pre { margin: 0; padding: 14px 16px; overflow-x: auto; color: #37475a;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.7; }
+.mcp-code .j-k { color: #1f6fd0; }
+.mcp-code .j-s { color: #0f8a5f; }
+
+.mcp-copy { padding: 4px 12px; border-radius: 7px; cursor: pointer; font-size: 11.5px; line-height: 1.5;
+  border: 1px solid #cfdcee; background: #fff; color: #2f6fe0; transition: all .15s; }
+.mcp-copy:hover { background: #eaf2ff; border-color: #2f6fe0; }
+.mcp-copy.done { color: #1f7a4d; border-color: #bfe3cd; background: #f0faf4; }
+/* 服务没起来时的占位提示 */
+.mcp-offline { padding: 22px 16px; border: 1px dashed #e3b7b2; border-radius: 12px;
+  background: #fdf7f6; text-align: center; font-size: 12.5px; line-height: 1.7; color: #a05a52; }
+.mcp-offline code { padding: 1px 5px; border-radius: 4px; background: rgba(217,83,79,.1);
+  color: #bf4038; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+
+.mcp-note { margin: 12px 0 0; font-size: 11.5px; line-height: 1.75; color: #8a97a8; }
+.mcp-note b { color: #5b6b80; }
+.mcp-note code { padding: 1px 5px; border-radius: 4px; background: rgba(47,127,224,.09);
+  color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 </style>

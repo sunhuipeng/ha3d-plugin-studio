@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { normalizeCatalog } = require('./catalog-schema');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');   // server/lib/ → 仓库根（文件挪进 lib/ 后多退一级）
 /* 端口与数据目录支持环境变量覆盖（Docker 部署用，对齐 ha-3d-home 的约定）：
  *   PORT                  监听端口，默认 8098
  *   HA3D_STUDIO_DATA_DIR  数据目录（projects/ + config.json），默认 <项目根>/data；容器里指向挂载卷 /data */
@@ -31,7 +31,7 @@ const modelsDir = (id) => path.join(projectDir(id), 'models');
 /* 老项目兼容：门/窗原先的 kind:'opening' 已废除 → 统一成 kind:'device' + type 'door'/'window'
  * （home 侧同一口径：kind 有 device / background / catalog 三类，门窗靠 type 区分）。
  * 读盘时归一，REST / MCP / 导出 / 预览拿到的都是新口径；下次保存自然写回新值。
- * kind 在项目创建时确定、之后不可改（PUT 时由 routes 比对磁盘值拒绝变更）。 */
+ * kind 在项目创建时确定、之后不可改（PUT 时由 projects.js 比对磁盘值拒绝变更）。 */
 function normalizeProject(proj) {
   const p = proj && proj.plugin;
   if (p) {
@@ -94,9 +94,27 @@ function listProjectSummaries() {
   return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+/* 删除: 优先 rmSync；部分环境（如 WorkBuddy 沙箱）拦截 rm，降级 rename 到 .deleted-* 隐藏目录。
+ * 项目删除与模型文件删除共用（projects.js / models.js 与 MCP 工具口径保持一致） */
+function safeRemove(targetPath) {
+  try {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    return { ok: true };
+  } catch (e) {
+    try {
+      const parent = path.dirname(targetPath);
+      const hidden = path.join(parent, '.deleted-' + Date.now() + '-' + path.basename(targetPath));
+      fs.renameSync(targetPath, hidden);
+      return { ok: true, degraded: true };
+    } catch (e2) {
+      return { ok: false, error: e2.message };
+    }
+  }
+}
+
 module.exports = {
-  ROOT, PORT, CLIENT_DIST, DATA_DIR, PROJECTS_DIR,
-  safeId, safeFile, ensureDir,
+  PORT, CLIENT_DIST, PROJECTS_DIR,
+  safeId, safeFile, ensureDir, safeRemove,
   modelsDir,
   readProject, writeProject, getConfig, saveConfig, remoteTarget,
   listModels, listProjectSummaries,

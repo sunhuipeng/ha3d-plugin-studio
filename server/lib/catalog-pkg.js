@@ -96,4 +96,4 @@ async function publishCatalog(projectId, bump) {
   return { manifest, copied, remote };
 }
 
-module.exports = { buildCatalogPackage, prepareCatalogExport, publishCatalog };
+module.exports = { prepareCatalogExport, publishCatalog };

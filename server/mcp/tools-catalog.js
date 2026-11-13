@@ -1,13 +1,20 @@
 /*
  * 家具包（kind: 'catalog'）专用 MCP 工具集
  *
+ * 服务端存的就是一份静态 GLB 文件集合 + project.json 里的 catalog.items 清单。
  * 插件编辑页那套工具（write_code / sync_config / set_option / click…）对家具项目没有意义，
  * 家具编辑页的核心是「清单 + 每个 GLB 的属性」。这里补齐四类能力：
- *   1. studio_list_catalog_items   列出当前页全部家具（含模型文件信息 / 可选 glb 摘要 / 可导出全部 glb）
- *   2. studio_get_catalog_item     单件家具详情：全量属性 + GLB 深度解析（结构/材质/贴图/动画/实测尺寸）
+ *   1. studio_list_catalog_items   列出当前页全部家具（纯列举：只返回 items 数组，每项含全量属性 + modelFile，无任何写副作用）
+ *   2. studio_get_catalog_item     单件家具详情：全量属性 + 模型文件信息（含 model.url 下载地址；纯读，不下载）
  *   3. studio_set_catalog_item     全量属性覆盖：单件整条替换 或 整张清单替换（merge=true 才增量合并）
  *   4. studio_upload_catalog_model 上传本机 GLB（可多个）+ 同时写好右侧属性配置
- *   附：studio_get_catalog_types / studio_delete_catalog_item
+ *   附：studio_get_catalog_types / studio_delete_catalog_items
+ *
+ * GLB 边界（2026-11-12 定）：服务端不解析 GLB 的顶点 / 结构 / 包围盒 / 尺寸，也不返回这些明细。
+ *   · 服务端只保留两类写操作：拆分（tools-models.js / split-glb.js）、修复材质（fixglb.js）；
+ *   · 详细数据一律「AI 按返回的 url 拼 MCP 服务器地址下载 → 用 Python / Node.js 自己解析」（见 H.GLB_PARSE），
+ *     尺寸经 item.w/d/h 传入；
+ *   · AI 按描述生成的新 glb 也是先落成本机 .glb 文件，再用 studio_upload_catalog_model 上传。
  *
  * 所有写操作：落盘 project.json → 通过 ws 通知编辑页刷新内存清单（what:'catalog'），
  * 避免前端旧内存下一次自动保存把 MCP 刚写的数据覆盖掉。
@@ -16,17 +23,16 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { z } = require('zod');
 const {
   readProject, writeProject, modelsDir, ensureDir, listModels, safeFile,
-} = require('../config');
+} = require('../lib/config');
 const {
   itemDef, ITEM_ID_RE, buildCatalogManifest, validateCatalog, slugOf, uniqueId,
-} = require('../catalog-schema');
-const { resolveCatalogTypes, fallbackTypes } = require('../catalog-types');
-const { prepareCatalogExport, publishCatalog } = require('../catalog-pkg');
-const hub = require('../ws-hub');
+} = require('../lib/catalog-schema');
+const { resolveCatalogTypes, fallbackTypes } = require('../lib/catalog-types');
+const { prepareCatalogExport, publishCatalog } = require('../lib/catalog-pkg');
+const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
 /* 一条家具的全部属性（右侧面板逐项）：全部可选，具体校验在 handler 里做，
@@ -35,11 +41,11 @@ const itemShape = z.object({
   id: z.any().optional().describe('条目 id（包内唯一；发布到 home 后变成 "<项目id>:<条目id>"）'),
   name: z.any().optional().describe('家具名称'),
   type: z.any().optional().describe('分类，必须命中 studio_get_catalog_types 的枚举；不确定填 other'),
-  w: z.any().optional().describe('宽（米，X，2D 占位用）'),
-  d: z.any().optional().describe('深（米，Z，2D 占位用）'),
-  h: z.any().optional().describe('高（米，Y，仅 3D 摆放参考）'),
+  w: z.any().optional().describe('宽（米，X，2D 占位用；自己下载 glb 后用 Python 或 Node.js 解析包围盒再填）'),
+  d: z.any().optional().describe('深（米，Z，2D 占位用；自己下载 glb 后用 Python 或 Node.js 解析包围盒再填）'),
+  h: z.any().optional().describe('高（米，Y，仅 3D 摆放参考；自己下载 glb 后用 Python 或 Node.js 解析包围盒再填）'),
   color: z.any().optional().describe('兜底色 #rrggbb（没有模型时的 2D 方块颜色）'),
-  model: z.any().optional().describe('GLB 文件名（必须存在于项目 models/）'),
+  model: z.any().optional().describe('GLB 纯文件名（必须存在于项目 models/）；只填文件名，不要填 URL / 路径，前端按这个文件名拼模型地址'),
   icon: z.any().optional().describe('2D 平面图标：64×64 SVG 图元字符串，可省'),
   scale: z.any().optional().describe('模型缩放系数（>0，缺省 1）'),
 }).passthrough();
@@ -93,19 +99,9 @@ function modelFileInfo(pid, file) {
   return row;
 }
 
-function itemOut(pid, it, withSummary) {
-  const row = { ...it, modelFile: modelFileInfo(pid, it.model) };
-  if (withSummary && row.modelFile.exists) {
-    try {
-      const g = H.glbSummary(fs.readFileSync(path.join(modelsDir(pid), it.model)));
-      row.glb = {
-        meshes: g.meshes, nodes: g.nodes, materials: g.materials,
-        animations: g.animations, textures: g.textures,
-        localBBox: g.bbox || null,
-      };
-    } catch (e) { row.glb = { error: e.message }; }
-  }
-  return row;
+/* 只返回清单属性 + 模型「文件」信息（是否存在 / 大小 / 时间 / URL），不解析 GLB 内容 */
+function itemOut(pid, it) {
+  return { ...it, modelFile: modelFileInfo(pid, it.model) };
 }
 
 /* 全量校验：strict=false 时「分类越界 / 模型文件不存在」降级成警告（方便先写配置后传模型） */
@@ -158,16 +154,6 @@ function saveAndNotify(pid, proj, files) {
   return notified;
 }
 
-/* saveTo 既可以是目录也可以是完整文件路径（与 studio_get_model 同口径） */
-function resolveSaveTo(saveTo, fileName, fallbackDir) {
-  const abs = saveTo ? path.resolve(saveTo) : path.join(fallbackDir, fileName);
-  const ex = path.extname(abs).toLowerCase();
-  const isDir = /[\\/]$/.test(String(saveTo || ''))
-    || (fs.existsSync(abs) && fs.statSync(abs).isDirectory())
-    || !ex || !/^\.(glb|gltf|bin)$/.test(ex);
-  return isDir ? path.join(abs, fileName) : abs;
-}
-
 function prettyName(file) {
   const base = String(file || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
   return base ? base.charAt(0).toUpperCase() + base.slice(1) : '未命名家具';
@@ -203,50 +189,26 @@ function manifestOf(proj) {
 /* ---------------- 工具注册 ---------------- */
 
 function register(server) {
-  /* 1. 列出当前页全部家具 / 模型 ------------------------------------ */
+  /* 1. 列出当前页全部家具（纯读，不落盘） ----------------------------- */
   server.tool(
     'studio_list_catalog_items',
-    '列出家具包编辑页左侧「家具清单」的全部条目（一个 GLB 一条）：每条的全量属性 + 模型文件是否存在/大小/URL，'
-    + 'withGlbSummary=true 再附 GLB 结构摘要；saveTo=<本机目录> 时把项目里所有 .glb 复制到该目录（返回绝对路径）。'
-    + '同时返回分类枚举、未被任何家具引用的模型、项目校验结果和将要发布的 item.json 预览。'
-    + '这是开工读家具项目上下文的第一步',
+    '列出家具包编辑页左侧「家具清单」的全部条目（一件家具一条），**返回值就是一个数组，没有其它顶层字段**。'
+    + '数组每项 = 该家具的全量属性（id/name/type/w/d/h/color/model…）+ modelFile（对应 glb 是否存在/大小/时间/URL）——'
+    + '「家具 + 它的 glb 文件信息」都在这一条里，不再另返 models / 分类枚举 / 校验 / manifest 预览。'
+    + '要分类用 studio_get_catalog_types、要看 models/ 目录全量文件用 studio_list_models（含未被任何家具引用的孤儿模型）、'
+    + '校验结果由写操作（set_catalog_item / upload_catalog_model）返回。'
+    + '本工具是纯列举：不写任何文件、不下载模型。每项的 modelFile.url 是完整路径，拼上 MCP 服务器地址即可下载；'
+    + '想解析模型内容就下载到本机，用 Python 或 Node.js 直接读（GLB = 12 字节头 + JSON chunk + BIN chunk，读 accessors 即可），'
+    + '零依赖即可，不要引入 three.js 等第三方库。'
+    + '服务端不解析 GLB 内容（顶点/节点/尺寸/材质明细一律不返回）',
     {
       projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
-      withGlbSummary: z.boolean().optional().describe('是否附每个模型的 GLB 结构摘要（默认 false）'),
-      saveTo: z.string().optional().describe('把项目内所有 .glb 复制到这个本机目录（不存在会自动建）'),
     },
-    async ({ projectId, withGlbSummary, saveTo }) => {
+    async ({ projectId }) => {
       try {
         const { pid, proj } = requireCatalog(projectId);
-        const { types, typeDefs, source, models } = await typesAndModels(pid);
         const items = (proj.catalog && Array.isArray(proj.catalog.items)) ? proj.catalog.items : [];
-        const check = checkItems(items, models, types, true);
-        const issues = validateCatalog(proj, models, types);
-
-        let exported = [];
-        if (saveTo) {
-          ensureDir(path.resolve(saveTo));
-          exported = models.map((f) => {
-            const dest = path.join(path.resolve(saveTo), f);
-            fs.copyFileSync(path.join(modelsDir(pid), f), dest);
-            return dest;
-          });
-        }
-
-        return H.text({
-          ok: true,
-          ...packageOut(pid, proj, typeDefs, source),
-          count: items.length,
-          items: items.map((it) => itemOut(pid, it, !!withGlbSummary)),
-          models: H.modelsOut(pid),
-          unusedModels: check.unused,
-          validation: { errors: check.errors, warnings: check.warnings, issues },
-          manifestPreview: manifestOf(proj),
-          ...(saveTo ? { exportedTo: exported, exportDir: path.resolve(saveTo) } : {}),
-          hint: items.length
-            ? '想看某一件的完整解析（材质/节点/实测尺寸）用 studio_get_catalog_item；改属性用 studio_set_catalog_item'
-            : '清单是空的：用 studio_upload_catalog_model 传 GLB（会顺带建好一条家具）',
-        });
+        return H.text(items.map((it) => itemOut(pid, it)));
       } catch (e) { return H.fail(e.message); }
     },
   );
@@ -255,15 +217,20 @@ function register(server) {
   server.tool(
     'studio_get_catalog_item',
     '读取一件家具的详细信息：右侧面板的全量属性配置（名称/分类/宽深高/兜底色/模型文件/图标/缩放/id）、'
-    + '模型文件信息、以及 GLB 的深度解析（容器、场景节点树、逐 mesh/primitive 顶点三角数、材质与贴图明细、'
-    + '动画、扩展、世界包围盒与实测 w/d/h）。saveTo 可把该 GLB 复制到本机路径供本地脚本进一步分析',
+    + '模型文件基本信息（是否存在/大小/时间/url）、分类枚举与校验结果。'
+    + '**model.url 是完整路径**（如 /api/projects/<id>/models/xxx.glb）——'
+    + '拼上你连接的 MCP 服务器地址即可直接下载这个 glb，不必再调一次 studio_get_model；'
+    + 'model.url 不含 http:// 主机与端口，MCP 不写本机文件。'
+    + '注意：item.model 只是纯文件名，别把 model.url 回填进 item.model（前端会按文件名拼地址，写成 URL 会 404）。'
+    + '本工具是纯读：不写文件、不下载模型。服务端不解析 GLB 内容——想拿节点树/顶点/包围盒 w·d·h/材质贴图，'
+    + '按 model.url 下载到本机，用 Python 或 Node.js 自己解析（读 12 字节头 + JSON chunk + BIN chunk 里的 accessors，'
+    + '零依赖即可，不要引入 three.js 等第三方库）；量出的尺寸用 studio_set_catalog_item 写回 w/d/h，'
+    + '或让用户在编辑页点「按模型实测」（前端本地算）',
     {
       projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
-      itemId: z.string().describe('条目 id（见 studio_list_catalog_items 的 items[].id）'),
-      saveTo: z.string().optional().describe('把这件家具的 GLB 复制到这个本机目录/文件路径（省略则不导出）'),
-      includeGlbDetail: z.boolean().optional().describe('是否附完整 GLB 深度解析（默认 true）'),
+      itemId: z.string().describe('条目 id（见 studio_list_catalog_items 返回的数组元素的 id）'),
     },
-    async ({ projectId, itemId, saveTo, includeGlbDetail }) => {
+    async ({ projectId, itemId }) => {
       try {
         const { pid, proj } = requireCatalog(projectId);
         const { types, typeDefs, source, models } = await typesAndModels(pid);
@@ -286,33 +253,12 @@ function register(server) {
         };
 
         if (info.exists) {
-          const buf = fs.readFileSync(path.join(modelsDir(pid), it.model));
-          row.glbSummary = H.glbSummary(buf);
-          if (includeGlbDetail !== false) {
-            try { row.glbDetail = H.glbDetail(buf); }
-            catch (e) { row.glbDetail = { error: e.message }; }
-          }
-          const measured = row.glbDetail && row.glbDetail.measured;
-          if (measured) {
-            row.measured = measured;
-            row.sizeDiff = {
-              w: Math.round((Number(it.w) - measured.w) * 1000) / 1000,
-              d: Math.round((Number(it.d) - measured.d) * 1000) / 1000,
-              h: Math.round((Number(it.h) - measured.h) * 1000) / 1000,
-            };
-            row.sizeMatch = Math.abs(row.sizeDiff.w) < 0.02 && Math.abs(row.sizeDiff.d) < 0.02 && Math.abs(row.sizeDiff.h) < 0.02;
-            row.hint = row.sizeMatch
-              ? '当前 w/d/h 与模型实测一致'
-              : '当前 w/d/h 与模型实测不一致：可用 studio_set_catalog_item 把尺寸改成 measured 的值（或让用户在右侧点「按模型实测」）';
-          }
-          if (saveTo) {
-            const dest = resolveSaveTo(saveTo, it.model, path.join(os.tmpdir(), 'ha3d-models', pid));
-            ensureDir(path.dirname(dest));
-            fs.copyFileSync(path.join(modelsDir(pid), it.model), dest);
-            row.savedTo = dest;
-          }
+          row.hint = `服务端不解析 GLB 内容：model.url 是完整路径（${info.url}），拼上 MCP 服务器地址下载到本机，`
+            + '用 Python 或 Node.js 自己读节点树/顶点/包围盒/材质明细（零依赖即可，不要引入 three.js 等第三方库）；'
+            + '量出的 w/d/h 可用 studio_set_catalog_item 写回';
         } else {
           row.warning = `模型文件「${it.model}」不在项目里：预览会加载失败，导出家具包也会被拦下`;
+          row.hint = 'model.url 是按 item.model 文件名拼出的路径，文件不存在时下载会 404；请先用 studio_upload_catalog_model 上传模型';
         }
         return H.text(row);
       } catch (e) { return H.fail(e.message); }
@@ -425,11 +371,16 @@ function register(server) {
     'studio_upload_catalog_model',
     '把本机 GLB 家具模型上传到当前家具包项目（支持一次多个），并同时写好右侧的属性配置。'
     + '单文件用 filePath + item；多文件用 filePaths + items（按顺序一一对应）。'
-    + 'item 里没给的属性自动补：名称取文件名、分类 other、颜色 #9aa7b8、尺寸按 GLB 世界包围盒实测（宽X/深Z/高Y，与编辑页「按模型实测」同口径）；'
+    + 'item 里没给的属性自动补：名称取文件名、分类 other、颜色 #9aa7b8、w/d/h 默认 0.8×0.8×0.6。'
+    + '**服务端不解析 GLB**：真实尺寸请先用 studio_get_model 拿到 url、拼上 MCP 服务器地址把 glb 下载到本机，'
+    + '再用 Python 或 Node.js 自己解析包围盒（宽 X / 深 Z / 高 Y，零依赖即可，不要引入 three.js 等第三方库），'
+    + '量出来后经 item.w/d/h 传入；也可上传后用 studio_set_catalog_item 补写，'
+    + '或让用户在编辑页点「按模型实测」（前端本地算）。'
     + 'model 一律强制为实际落盘的文件名。文件名会 ASCII 化（服务端只收 [A-Za-z0-9._-]）。'
     + '**同一个家具包里同名模型直接覆盖**（不加 _2 后缀）：已有条目引用这个模型就更新那一条而不是新建重复家具；'
     + '同一次批量里出现同名，也视为同一个模型，最后一个文件覆盖前面的。'
-    + '返回上传清单、生成/更新的条目、实测尺寸、校验结果与 item.json 预览',
+    + '返回上传清单、生成/更新的条目、校验结果与 item.json 预览。'
+    + 'AI 按描述生成 / 修改好的 glb 也走这里上传：先落成本机 .glb 文件，再传 filePath',
     {
       projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
       filePath: z.string().optional().describe('单个本机 GLB 的绝对路径'),
@@ -437,10 +388,9 @@ function register(server) {
       name: z.string().optional().describe('落盘文件名（仅单文件有效；省略则按源文件名 ASCII 化）'),
       item: itemShape.optional().describe('单文件的最终版属性配置（全量；没给的字段按规则自动补）'),
       items: z.array(itemShape).optional().describe('批量时逐件的属性配置，顺序对应 filePaths'),
-      measure: z.boolean().optional().describe('默认 true：按 GLB 实测 w/d/h；false 则用默认 0.8×0.8×0.6'),
       strict: z.boolean().optional().describe('默认 true：分类越界直接拒绝；false 降级为警告'),
     },
-    async ({ projectId, filePath, filePaths, name, item, items, measure, strict }) => {
+    async ({ projectId, filePath, filePaths, name, item, items, strict }) => {
       try {
         const { pid, proj } = requireCatalog(projectId);
         const sources = Array.isArray(filePaths) && filePaths.length
@@ -485,8 +435,8 @@ function register(server) {
           const existed = fs.existsSync(path.join(dir, target));
           fs.writeFileSync(path.join(dir, target), s.buf);
 
-          const measured = measure === false ? null : H.measureGlb(s.buf);
-          const defaultSize = measured || { w: 0.8, d: 0.8, h: 0.6 };
+          /* 服务端不实测尺寸：w/d/h 由调用方下载 glb 后用 Python / Node.js 解析包围盒传入，没传就用默认值 */
+          const defaultSize = { w: 0.8, d: 0.8, h: 0.6 };
           const takenIds = new Set(current.map((x) => x && x.id));
           /* 定位目标条目：同名模型 = 同一件家具。
            * 优先按模型文件找（重传 / 批量里同名都落到这一条），其次按显式 id；
@@ -516,7 +466,7 @@ function register(server) {
 
           uploaded.push({
             from: s.abs, file: target, bytes: s.buf.length,
-            measured, url: `/api/projects/${pid}/models/${encodeURIComponent(target)}`,
+            url: `/api/projects/${pid}/models/${encodeURIComponent(target)}`,
             overwritten: existed || seenInCall.has(target.toLowerCase()),
           });
           seenInCall.add(target.toLowerCase());
@@ -546,12 +496,13 @@ function register(server) {
           touched,
           count: current.length,
           models: H.modelsOut(pid),
-          items: current.map((it) => itemOut(pid, it, false)),
+          items: current.map((it) => itemOut(pid, it)),
           validation: { errors: check.errors, warnings: check.warnings, issues },
           manifestPreview: manifestOf(proj),
           notified,
           hint: '模型与属性都已落盘；同名模型直接覆盖（重传即更新原条目，不会多出一件家具），编辑页会自动刷新清单与 3D 预览。'
-            + '分类可用 studio_get_catalog_types 查，改属性用 studio_set_catalog_item',
+            + '尺寸是调用方传入或默认值（服务端不实测）：需要真实尺寸就下载 glb 后用 Python / Node.js 自己解析包围盒，'
+            + '再用 studio_set_catalog_item 写回；分类可用 studio_get_catalog_types 查',
         });
       } catch (e) { return H.fail(e.message); }
     },
@@ -609,46 +560,83 @@ function register(server) {
     },
   );
 
-  /* 附 2：删除条目 --------------------------------------------------- */
+  /* 附 2：删除家具（条目 + 模型文件 + 清单同步） ------------------------ */
   server.tool(
-    'studio_delete_catalog_item',
-    '从家具清单移除一条（默认保留模型文件，和编辑页的「从清单移除」一致）；deleteModel=true 时连 models/ 里的 GLB 一起删。'
-    + '若还有别的家具引用同一个模型，会提示且不会静默弄坏它们',
+    'studio_delete_catalog_items',
+    '家具包专用：按条目 id 批量删除家具（itemIds 数组）。**一次把三件事做完**——'
+    + '① 从 project.json 的 catalog.items 移除这些条目并落盘；'
+    + '② 默认连它们引用的 .glb 一起从 models/ 删掉（deleteModel:false 可只删条目、保留模型）；'
+    + '③ 通知家具编辑页刷新清单与模型缓存。'
+    + '「还有别的家具在用同一个模型」时不会删那个文件（避免弄坏其它条目），会在 keptModels 里说明。'
+    + '插件项目请用 studio_delete_models（只删文件、报代码引用）。'
+    + 'dryRun=true 只返回删除计划、不删文件也不改配置。'
+    + '删一件也用本工具：itemIds 传单个 id 即可；deleteModel:false 就是「只从清单移除、保留模型」，deleteModel:true（默认）才连 .glb 一起删',
     {
       projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
-      itemId: z.string().describe('要移除的条目 id'),
-      deleteModel: z.boolean().optional().describe('默认 false：只删条目；true：连模型文件一起删'),
+      itemIds: z.array(z.string()).describe('要删除的家具条目 id 数组（见 studio_list_catalog_items 返回的数组元素的 id）'),
+      deleteModel: z.boolean().optional().describe('默认 true：连模型文件一起删；false = 只删条目、保留 .glb'),
+      dryRun: z.boolean().optional().describe('默认 false；true 只返回计划，不落盘'),
     },
-    async ({ projectId, itemId, deleteModel }) => {
+    async ({ projectId, itemIds, deleteModel, dryRun }) => {
       try {
         const { pid, proj } = requireCatalog(projectId);
         const items = (proj.catalog && Array.isArray(proj.catalog.items)) ? proj.catalog.items : [];
-        const idx = items.findIndex((x) => x && x.id === itemId);
-        if (idx < 0) throw new Error(`找不到条目「${itemId}」。现有：${items.map((x) => x.id).join(', ') || '（空清单）'}`);
-        const removed = { ...items[idx] };
-        items.splice(idx, 1);
-        let modelDeleted = false;
-        let otherUsers = [];
-        if (deleteModel && removed.model) {
-          otherUsers = items.filter((x) => x.model === removed.model).map((x) => x.id);
-          if (otherUsers.length) {
-            return H.fail(`还有 ${otherUsers.length} 件家具在用「${removed.model}」：${otherUsers.join(', ')}。`
-              + '不删模型文件更安全；确认要删请先把它们改成别的模型，或用 deleteModel=false 只删条目');
-          }
-          const p = path.join(modelsDir(pid), path.basename(removed.model));
-          if (fs.existsSync(p)) { fs.unlinkSync(p); modelDeleted = true; }
+        const ids = [...new Set((Array.isArray(itemIds) ? itemIds : []).map((x) => String(x || '')).filter(Boolean))];
+        if (!ids.length) return H.fail('itemIds 不能为空：传要删除的家具条目 id 数组');
+
+        const removed = [];
+        const missing = [];
+        for (const id of ids) {
+          const it = items.find((x) => x && x.id === id);
+          if (it) removed.push({ ...it }); else missing.push(id);
         }
-        proj.catalog.items = items;
-        const notified = saveAndNotify(pid, proj, modelDeleted ? [removed.model] : []);
+        if (!removed.length) {
+          return H.fail(`找不到任何条目：${missing.join(', ')}。现有：${items.map((x) => x.id).join(', ') || '（空清单）'}`);
+        }
+        const remaining = items.filter((x) => !(x && ids.includes(x.id)));
+
+        /* 只删「已无其它条目引用」的模型；同名模型被多件家具共用时保留文件 */
+        const wantModel = deleteModel !== false;
+        const names = [...new Set(removed.map((x) => path.basename(String(x.model || ''))).filter(Boolean))];
+        const modelPlan = names.map((file) => {
+          const abs = path.join(modelsDir(pid), file);
+          const exists = fs.existsSync(abs);
+          const usedBy = remaining.filter((x) => x && path.basename(String(x.model || '')) === file).map((x) => x.id);
+          return {
+            file, exists, usedBy,
+            willDelete: wantModel && exists && usedBy.length === 0,
+            reason: !wantModel ? 'deleteModel=false' : !exists ? '文件不存在' : usedBy.length ? `仍被 ${usedBy.join(', ')} 引用` : '',
+          };
+        });
+
+        if (dryRun) {
+          return H.text({
+            ok: true, dryRun: true, projectId: pid,
+            removed, missing, modelPlan,
+            remainingItemCount: remaining.length,
+            hint: '这是预演：没有删任何文件、也没有改 project.json；去掉 dryRun 才会真正执行',
+          });
+        }
+
+        const deletedModels = [];
+        for (const m of modelPlan) {
+          if (!m.willDelete) continue;
+          fs.unlinkSync(path.join(modelsDir(pid), m.file));
+          deletedModels.push(m.file);
+        }
+        proj.catalog ||= {};
+        proj.catalog.items = remaining;
+        const notified = saveAndNotify(pid, proj, deletedModels);
         return H.text({
-          ok: true,
-          projectId: pid,
-          removed,
-          modelDeleted,
-          count: items.length,
-          items: items.map((it) => itemOut(pid, it, false)),
+          ok: true, projectId: pid,
+          removed, missing, deletedModels,
+          keptModels: modelPlan.filter((m) => !m.willDelete),
+          count: remaining.length,
+          items: remaining.map((it) => itemOut(pid, it)),
           notified,
-          hint: modelDeleted ? '条目与模型文件都已删除' : '已移除条目，模型文件保留在项目 models/ 里',
+          hint: deletedModels.length
+            ? '条目、模型文件与 project.json 清单已同步更新，编辑页会自动刷新'
+            : '条目已从清单移除；模型文件按计划保留（见 keptModels）',
         });
       } catch (e) { return H.fail(e.message); }
     },
@@ -658,31 +646,22 @@ function register(server) {
   server.tool(
     'studio_export_catalog',
     '把家具包项目导出成 ha-3d-home 能导入的 zip：item.json（kind/id/items 数组）+ 被引用 .glb 平铺在包根。'
-    + '返回 zipBase64（可选 saveTo 直接写到本机路径）、清单全文、打包进去的模型与校验警告。'
+    + '返回 zipBase64 + 清单全文 + 打包进去的模型与校验警告；**MCP 不写本机文件**，要落盘请自行把 zipBase64 解码保存。'
     + '不发布、不改版本号；有 error 级问题（空清单/分类越界/模型缺失）时拒绝导出',
     {
       projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
       bump: z.boolean().optional().describe('导出清单里的版本号 +1（只影响本次导出，不写回项目）'),
-      saveTo: z.string().optional().describe('把 zip 写到这个本机目录/文件路径（省略则只返回 zipBase64）'),
     },
-    async ({ projectId, bump, saveTo }) => {
+    async ({ projectId, bump }) => {
       try {
         const { pid } = requireCatalog(projectId);
         const { types } = await typesAndModels(pid);
         const { manifest, buf, copied, warnings } = await prepareCatalogExport(pid, { bump: !!bump, types });
-        const fileName = `${pid}-catalog.zip`;
-        let savedTo = '';
-        if (saveTo) {
-          savedTo = resolveSaveTo(saveTo, fileName, path.join(os.tmpdir(), 'ha3d-catalog'));
-          ensureDir(path.dirname(savedTo));
-          fs.writeFileSync(savedTo, buf);
-        }
         return H.text({
-          ok: true, projectId: pid, bytes: buf.length, fileName,
-          ...(savedTo ? { savedTo } : {}),
+          ok: true, projectId: pid, bytes: buf.length, fileName: `${pid}-catalog.zip`,
           zipBase64: buf.toString('base64'),
           manifest, copied, warnings,
-          hint: 'zip 里 item.json 与各 .glb 平铺；可直接在 home 右上角「导入插件/包」上传，或用 studio_publish_catalog 远程发布',
+          hint: 'zip 里 item.json 与各 .glb 平铺；把 zipBase64 解码保存成 .zip 后，可直接在 home 右上角「导入插件/包」上传，或用 studio_publish_catalog 远程发布',
         });
       } catch (e) { return H.fail(e.message); }
     },
@@ -718,12 +697,14 @@ function register(server) {
    * 与 studio_view / studio_screenshot 共用同一个 selectItem 门面方法。 */
   server.tool(
     'studio_select_catalog_item',
-    '选中家具编辑页左侧清单的某一条，把它的 GLB 加载到中间 3D 预览（等价于在页面上点击该清单项）。'
-    + '会等模型真正加载完成才返回，返回当前条目 id / 名称 / 模型文件、包围盒尺寸与相机状态；'
-    + '之后可用 studio_view 摆机位、studio_screenshot 截图，或直接在后两者里带 itemId 一步完成',
+    '**切换当前预览的家具**：选中家具编辑页左侧清单的某一条，把它的 GLB 加载进中间 3D 预览（等价于在页面上点击该清单项）。'
+    + '清单里有多件家具时用它指定「现在预览哪一件」。'
+    + '会等模型真正加载完成才返回，返回当前条目 id / 名称 / 模型文件、实测包围盒尺寸与相机状态；'
+    + '之后可用 studio_view 摆机位、studio_screenshot 截图，或直接在后两者里带 itemId 一步完成。'
+    + '只改页面 UI 状态，不写 project.json（想改属性用 studio_set_catalog_item）',
     {
       projectId: z.string().optional(),
-      itemId: z.string().describe('条目 id（见 studio_list_catalog_items 的 items[].id）'),
+      itemId: z.string().describe('条目 id（见 studio_list_catalog_items 返回的数组元素的 id）'),
     },
     async ({ projectId, itemId }) => {
       try {

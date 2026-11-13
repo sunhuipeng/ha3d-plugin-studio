@@ -275,12 +275,14 @@ export function createPluginEngine(deps) {
         throw new Error('插件 ' + def.id + ' 缺少 model3d(ctx)');
       }
       if (!isBg && !def.type) {
-        console.warn('[plugins] 插件缺 type（HA 域或 door/window），样式不会归入任何分类:', def.id);
+        console.warn('[plugins] 插件缺 type（HA 域或 door/window/furniture），样式不会归入任何分类:', def.id);
       }
       /* 3D 状态标签开关（注册时定死，实例不可改）：
-       *   设备缺省显示；门/窗缺省不显示（门洞上方挂状态牌很怪），要显示就显式 labels:true。
-       * 读取走 wantsLabel()，预览标签管线唯一入口。 */
-      def.labels = def.labels != null ? !!def.labels : !(def.type === 'door' || def.type === 'window');
+       *   设备缺省显示；门/窗/家具缺省不显示（门洞上方挂状态牌、柜子上方挂状态牌都很怪），
+       *   要显示就显式 labels:true。读取走 wantsLabel()，预览标签管线唯一入口。 */
+      def.labels = def.labels != null
+        ? !!def.labels
+        : !(def.type === 'door' || def.type === 'window' || def.type === 'furniture');
       if (this.byId[def.id]) {
         const i = this.defs.indexOf(this.byId[def.id]);
         if (i >= 0) this.defs.splice(i, 1);
