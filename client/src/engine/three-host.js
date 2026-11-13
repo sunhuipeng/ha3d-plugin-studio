@@ -55,7 +55,7 @@ export class ThreeHost {
        否则 studio 里插件贴图会发白掉饱和、大屏又是另一个色（见 three-legacy.js） */
     applyLegacyRenderer(this.renderer);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    /* 底板色对齐 home display.html 的 #stage（#fafbfd），空白天区不再偏灰 */
+    /* 底板色对齐 home index 大屏的 #stage（#fafbfd），空白天区不再偏灰 */
     this.renderer.setClearColor(0xfafbfd, 1);
     el.appendChild(this.renderer.domElement);
 

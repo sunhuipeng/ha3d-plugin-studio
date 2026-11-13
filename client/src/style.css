@@ -1111,7 +1111,7 @@ textarea:not([class]) {
 
 /* ============ 插件预览渲染区 ============ */
 .pv-stage {
-  background: #fafbfd;   /* 与 home display.html 的 #stage 同色 */
+  background: #fafbfd;   /* 与 home index 大屏的 #stage 同色 */
   user-select: none;
 }
 .pv-mount {

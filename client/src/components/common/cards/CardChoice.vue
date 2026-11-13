@@ -37,14 +37,17 @@ export default {
 .dc-row { min-width: 0; }
 .dc-choice { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dc-label { font-size: 12px; color: var(--ink2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
-/* 分段控件外壳：浅灰蓝底槽 + 细边 + 胶囊圆角，和开关胶囊 / 滑块同一配色语言 */
+/* 分段控件外壳：浅灰蓝底槽 + 细边 + 小圆角（10px，与卡片/子卡同尺度，
+   不要 999px —— 选项换行时胶囊会被拉成一条怪异的超长圆角条）。
+   按钮内边距压紧，6 个两字选项（如空调的 自动/制冷/制热/除湿/送风/关闭）能在
+   一排内放下，避免最后一个选项被挤到第二行、看着像独立控件。 */
 .seg-group {
-  display: flex; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; gap: 3px;
-  padding: 3px; border: 1px solid #e3eaf4; border-radius: 999px; background: #f2f5fa;
+  display: flex; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; gap: 2px;
+  padding: 3px; border: 1px solid #e3eaf4; border-radius: 10px; background: #f2f5fa;
 }
 .seg-btn {
-  flex: 1 1 auto; min-width: 0; height: 26px; padding: 0 12px;
-  border: 1px solid transparent; border-radius: 999px;
+  flex: 1 1 auto; min-width: 0; height: 25px; padding: 0 7px;
+  border: 1px solid transparent; border-radius: 7px;
   background: transparent; color: var(--ink2);
   font-size: 12px; line-height: 1; font-family: inherit; cursor: pointer;
   white-space: nowrap;

@@ -668,7 +668,8 @@ export function createPluginEngine(deps) {
      *   · offsetX/offsetZ（保留键）：房屋相对背景中心的偏移（米）。先算进 house / safe，
      *     再据此把背景 group 摆到「房屋世界中心 − 偏移」，于是房子不动、背景绕着它偏
      *   · houseY（保留键）：房屋地板高度（可为负）。引擎抬升占位盒、插件按同一个值画脚下地形；
-     *     safe 只额外添加 houseY/baseY/houseH/topY 四个数值，水平方向 forbidden/allowed 不变
+     *     safe 只额外添加 houseY/baseY/houseH/topY 四个数值，水平方向 forbidden 不变；
+     *     不设外圈半径/allowed（与 home 同步删除）—— 撒点外界用 ctx.planeSize/2 自己钳
      * home 侧同源实现：ha-3d-home / public/js/plugins.js → PluginEngine.applyBackground
      */
     _spawnBackground(style, options, o) {
@@ -705,20 +706,16 @@ export function createPluginEngine(deps) {
         hash: 'studio-' + W + 'x' + D + '@' + offX + ',' + offZ,
       };
       /* 与 home 的 PluginEngine.safeZone 同口径（plugins.js safeZone）：
-       * forbidden = 房屋占地 + inner 走廊；allowed = 走廊外 + 距房屋中心 ≤ outer。
+       * forbidden = 房屋占地 + inner 走廊；不设外圈半径/allowed —— 旧版「距房屋中心 45m 圆」
+       * 与地面矩形脱节（偏移大时越界、平面放大时偏小），外界由插件用 ctx.planeSize/2 钳制。
        * 全部由上面带偏移的 house 派生 —— 房屋偏到哪，安全区就跟到哪。 */
       const safe = {
-        inner: 1.5, outer: 45,
+        inner: 1.5,
         x0: house.minX - 1.5, x1: house.maxX + 1.5,
         y0: house.minY - 1.5, y1: house.maxY + 1.5,
-        /* 只额外添加高度信息（纯数值）；水平方向的 forbidden/allowed 一字不动 */
+        /* 只额外添加高度信息（纯数值）；水平方向的 forbidden 一字不动 */
         houseY: baseY, baseY, houseH: boxH, topY: baseY + boxH,
         forbidden(x, z) { return x > safe.x0 && x < safe.x1 && z > safe.y0 && z < safe.y1; },
-        allowed(x, z) {
-          if (safe.forbidden(x, z)) return false;
-          const dx = x - house.cx, dz = z - house.cy;
-          return dx * dx + dz * dz <= safe.outer * safe.outer;
-        },
       };
       /* 平面默认边长：至少 120m；偏移把房子推到边缘时才自动放大，保证房屋整块踩在地面上 */
       const needHalf = Math.max(Math.abs(offX) + W / 2, Math.abs(offZ) + D / 2) + 4;

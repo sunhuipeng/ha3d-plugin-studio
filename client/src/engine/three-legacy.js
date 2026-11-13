@@ -1,6 +1,6 @@
 /* three-legacy — 让 studio 的画面对齐 home（three r147 legacy 管线）
  *
- * 背景：home 两个页面（index.html / display.html）用的是 three r147，
+ * 背景：home 页面（index/edit.html，index 按设备分发展板/面板）用的是 three r147，
  * 默认走 legacy 管线：
  *   · ColorManagement 关闭      → new Color('#8cab68') 不做 sRGB→linear 转换
  *   · outputEncoding = Linear   → 渲染结果不做 linear→sRGB 编码
