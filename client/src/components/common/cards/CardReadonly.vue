@@ -23,8 +23,9 @@ export default {
 <style scoped>
 .dc-row { min-width: 0; }
 .dc-ro { display: flex; align-items: center; justify-content: space-between; gap: 5px; flex-wrap: wrap; }
-.dc-label { font-size: 12px; color: var(--ink2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dc-v { font-size: 12.5px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.dc-v i { font-size: 10px; color: var(--ink2); font-style: normal; margin-left: 1px; }
+/* 统一尺度（2026-11-14）：读数 13.5px / 标签 13px / 单位 11px。 */
+.dc-label { font-size: 13px; color: var(--ink2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dc-v { font-size: 13.5px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dc-v i { font-size: 11px; color: var(--ink2); font-style: normal; margin-left: 1px; }
 .dc-ro.dis { opacity: .5; }
 </style>

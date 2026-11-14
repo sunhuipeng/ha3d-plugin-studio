@@ -16,10 +16,10 @@
         <div v-for="(c, ci) in b.items" :key="tileKey(c, ci)" class="dc-tile"
           :style="{ gridColumn: 'span ' + spanOf(b.items, c) }">
           <!-- 开关类（switch / bool）统一交给 CardToggle 画胶囊，设备名覆盖掉控件 label -->
-          <CardToggle v-if="isToggle(c)" :node="c" :text="c._title || c.label" @act="relay" />
+          <CardToggle v-if="isToggle(c)" :node="c" :text="c._title || c.label" />
           <template v-else>
             <div class="dc-tile-name" v-if="!single">{{ c._title }}</div>
-            <component v-if="comp(c)" :is="comp(c)" :node="c" @act="relay" />
+            <component v-if="comp(c)" :is="comp(c)" :node="c" />
           </template>
         </div>
       </div>
@@ -27,14 +27,14 @@
       <div v-else class="dc-dev">
         <div class="dc-dev-head" v-if="!single">
           <b>{{ b.card.title }}</b>
-          <!-- 设备子卡标题右侧的电源开关：完全复用插件自身的 isOn 与 click，见 CardPowerToggle -->
+          <!-- 设备子卡标题右侧的电源开关：展示插件自身的 isOn 状态，见 CardPowerToggle -->
           <CardPowerToggle class="dc-head-right"
             :eid="b.card._entityId" :type="b.card._type" :style="b.card._style"
             :clickable="power.clickable" :on="power.on" :words="power.words"
-            :readonly="power.readonly" @act="relay" />
+            :readonly="power.readonly" />
         </div>
         <!-- 单设备没有子卡标题行，电源开关上移到 CardView 整卡总标题右侧 -->
-        <CardGroup :node="b.card" @act="relay" />
+        <CardGroup :node="b.card" />
       </div>
     </template>
   </div>
@@ -64,9 +64,7 @@ export default {
     /* 由 CardView 透传的电源开关注入数据（studio 版），见 CardPowerToggle */
     power: { type: Object, default: () => ({}) },
   },
-  emits: ['act'],
   methods: {
-    relay(node, value) { this.$emit('act', node, value); },
     comp(c) { return COMPONENTS[CardEngine.componentOf(c)] || null; },
     isToggle(c) { return c.type === 'switch' || c.type === 'bool'; },
     /* 网格块内每位的占列（总 4 列）：
@@ -103,15 +101,16 @@ export default {
 /* ---- grid：4 列栅格，columns 决定占列 ---- */
 .dc-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .dc-tile { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+/* 子卡文字尺度与 ha-3d-home 对齐：设备名 11.5px、子卡标题 13.5px。 */
 .dc-tile-name {
-  font-size: 10.5px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11.5px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ---- 完整子卡（group 设备）头部 ----
  * 布局：标题靠左；右侧的电源开关（CardPowerToggle，class=dc-head-right）被
  *       margin-left:auto 推到最右，完全复用插件自身的 isOn 与 click。 */
 .dc-dev-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.dc-dev-head b { font-size: 12.5px; font-weight: 700; color: var(--ink); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dc-dev-head b { font-size: 13.5px; font-weight: 700; color: var(--ink); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 设备子卡标题右侧的电源开关：推到最右 */
 .dc-head-right { margin-left: auto; display: flex; align-items: center; flex: none; }
 </style>

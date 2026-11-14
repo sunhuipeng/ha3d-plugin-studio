@@ -17,11 +17,11 @@
       <CardPowerToggle v-if="node._single && singleCard" class="dc-head-right"
         :eid="singleCard._entityId" :type="singleCard._type" :style="singleCard._style"
         :clickable="power.clickable" :on="power.on" :words="power.words"
-        :readonly="power.readonly" @act="relay" />
+        :readonly="power.readonly" />
     </header>
     <div class="dc-body">
       <p class="dc-empty" v-if="!blocks.length">{{ emptyText }}</p>
-      <CardDevices v-else :blocks="blocks" :single="node._single" :power="power" @act="relay" />
+      <CardDevices v-else :blocks="blocks" :single="node._single" :power="power" />
     </div>
   </section>
 </template>
@@ -49,7 +49,6 @@ export default {
        组件自身不读 HA / store，全部由外层算好。缺省空对象 = 不显示开关。 */
     power: { type: Object, default: () => ({}) },
   },
-  emits: ['act'],
   computed: {
     /* HA 实体就绪才渲染（useCards 建树时写入 _ready；缺省视为就绪，兼容手造节点） */
     ready() { return this.node._ready !== false; },
@@ -68,7 +67,6 @@ export default {
     },
   },
   methods: {
-    relay(node, value) { this.$emit('act', node, value); },
     comp(node) { return COMPONENTS[CardEngine.componentOf(node)] || null; },
   },
 };
@@ -81,22 +79,24 @@ export default {
   display: flex; flex-direction: column; min-height: 0; overflow: hidden;
 }
 .dc-shell.is-preview { border: 1px dashed #b9c6da; box-shadow: 0 8px 22px rgba(20, 30, 50, .14); }
+/* 卡头尺度与 ha-3d-home 对齐（2026-11-14 统一）：图标徽标 30px、标题 14.5px、
+   预览标签 11px、空态 13px。 */
 .dc-tag {
   position: absolute; top: -1px; left: 10px; transform: translateY(-100%);
-  font-size: 10px; line-height: 1; color: #6b7a90; background: #f4f7fb;
+  font-size: 11px; line-height: 1; color: #6b7a90; background: #f4f7fb;
   border: 1px dashed #b9c6da; border-bottom: none; border-radius: 6px 6px 0 0;
   padding: 3px 7px;
 }
 .dc-head {
-  display: flex; align-items: center; gap: 9px; padding: 10px 12px 9px;
+  display: flex; align-items: center; gap: 9px; padding: 11px 13px 10px;
   border-bottom: 1px solid var(--line); flex: none;
 }
 .dc-ico {
-  width: 26px; height: 26px; border-radius: 8px; background: var(--blue-soft);
-  display: flex; align-items: center; justify-content: center; font-size: 13px; flex: none;
+  width: 30px; height: 30px; border-radius: 9px; background: var(--blue-soft);
+  display: flex; align-items: center; justify-content: center; font-size: 15px; flex: none;
 }
 .dc-title {
-  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; color: var(--ink);
+  flex: 1; min-width: 0; font-size: 14.5px; font-weight: 700; color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 单设备视图：电源开关推到整卡总标题最右 */
@@ -107,5 +107,5 @@ export default {
   padding: 10px 12px 12px; overflow-y: auto; overscroll-behavior: contain; min-height: 0;
   background: #f2f5fa;
 }
-.dc-empty { font-size: 12px; color: var(--ink2); text-align: center; padding: 14px 0; }
+.dc-empty { font-size: 13px; color: var(--ink2); text-align: center; padding: 14px 0; }
 </style>

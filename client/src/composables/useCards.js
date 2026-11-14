@@ -6,7 +6,8 @@
  *   1) 结构树 tree：随「代码重载 / 样式重生」重建（rebuild() 手动推 structVersion）
  *   2) 值树 view：随 mock 实体状态变化重算（ui.entityVersion，由 mock-ha 广播驱动）
  *
- * ⚠ 只读预览：控件 emit('act') 由页面壳忽略，不反向改实体状态。
+ * ⚠ 只读展示：components/common/cards/ 下的卡片组件全部是纯渲染 —— 不 emit act、
+ *   不接输入事件、不调 HA；页面壳（PluginStage）也没有 @act 监听。
  *   home 那份 useCards 的 run() / HA.callService 链路在这里刻意不实现。
  *
  * 入参 getPreview 是 getter（() => PluginPreview 实例），因为 PluginPreview

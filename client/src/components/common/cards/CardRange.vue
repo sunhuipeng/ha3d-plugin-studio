@@ -1,13 +1,22 @@
 <template>
-  <!-- 滑块：本地 draft 优先（HA 回推有 300ms~1s 延迟，直接读服务端值会「拖到 60 → 跳回 30 → 再跳回 60」）。
-       规则：input 只改 draft 并 180ms 节流发服务；松手（change）必须补发一次；发出后 1.2s 内 draft 优先。
-       没写 action 时是纯显示，不发服务。 -->
+  <!-- 滑块（只读展示版）：studio 卡片只预览外观，不反控设备。
+       与 ha-3d-home 的自绘 range 同一套视觉：20px 圆角胶囊轨道，左段主题蓝描边 +
+       淡色填充，右段灰轨，20×30 竖向椭圆把手。这里没有 pointer / input / change，
+       也不 emit act —— 把手位置只由 node._value 算出来，纯静态。
+       ⚠ 引擎侧 engine/cards.js 与 home 逐字同源，不要改；这里只管渲染。 -->
   <div class="dc-row dc-range" :class="{ dis: dis }">
     <span class="dc-label">{{ node.label || node.attr || '数值' }}</span>
     <span class="dc-val">{{ shownText }}<i v-if="node.unit">{{ node.unit }}</i></span>
-    <input type="range" :min="node._min" :max="node._max" :step="node._step || 1"
-      :value="shown" :disabled="dis"
-      @input="onInput" @change="onChange" @pointerdown.stop @wheel.stop />
+    <div class="dc-slider" role="slider" aria-readonly="true"
+      :aria-label="node.label || node.attr || '数值'"
+      :aria-valuemin="node._min" :aria-valuemax="node._max" :aria-valuenow="Number(shown)"
+      :aria-valuetext="shownText + (node.unit || '')" :aria-disabled="dis ? 'true' : 'false'">
+      <div class="dc-inner">
+        <div class="dc-track"></div>
+        <div class="dc-fill" :style="fillStyle"></div>
+        <div class="dc-thumb" :style="{ left: pct }"></div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -15,21 +24,14 @@
 export default {
   name: 'CardRange',
   props: { node: { type: Object, required: true } },
-  emits: ['act'],
-  data() {
-    return { draft: null, dragging: false, pending: false };
-  },
   computed: {
-    dis() { return !!(this.node._disabled || !this.node.action); },
-    /* 拖动中 / 刚发出还没回推 → 用本地值；否则用服务端值。
-     * 注意 draft 可能被 watch 清空，这里必须判 null —— 否则 `:value` 拿到 null，
-     * 浏览器会把滑块画成量程中点（50），看起来像「值自己跳到 50」。 */
+    /* 只读预览：只有「实体不可用」才灰化。不再因「没写 action」禁用 ——
+       这里不反控，action 字段与展示无关。 */
+    dis() { return !!this.node._disabled; },
     shown() {
-      if ((this.dragging || this.pending) && this.draft != null) return this.draft;
       const v = this.node._value;
       return v == null ? this.node._min : v;
     },
-    /* 显示精度跟着 step 走（0.5 的温控不能显示成 24.0000001） */
     scalePow() {
       const s = Number(this.node._step) || 1;
       return s < 1 ? 2 : 0;
@@ -39,35 +41,15 @@ export default {
       if (!isFinite(v)) return String(this.shown);
       return String(Number(v.toFixed(this.scalePow)));
     },
-  },
-  watch: {
-    /* 外部值变了（HA 回推 / 换设备）→ 丢掉本地草稿；pending 窗口内不动，
-     * 否则「松手 → 清 draft → 渲染 null → 跳到中点」 */
-    'node._value'() { if (!this.dragging && !this.pending) this.draft = null; },
-  },
-  beforeUnmount() { clearTimeout(this.sendTimer); clearTimeout(this.pendTimer); },
-  methods: {
-    onInput(e) {
-      this.draft = Number(e.target.value);
-      this.dragging = true;
-      clearTimeout(this.sendTimer);
-      this.sendTimer = setTimeout(() => this.flush(), 180);
+    ratio() {
+      const min = Number(this.node._min), max = Number(this.node._max);
+      const v = Number(this.shown);
+      if (!isFinite(min) || !isFinite(max) || max <= min || !isFinite(v)) return 0;
+      return Math.min(1, Math.max(0, (v - min) / (max - min)));
     },
-    onChange() {
-      this.dragging = false;
-      clearTimeout(this.sendTimer);
-      this.flush();          // 松手补发，否则最后一次值丢掉
-    },
-    flush() {
-      if (this.draft == null || this.dis) return;
-      this.pending = true;
-      this.$emit('act', this.node, Number(this.draft.toFixed(this.scalePow)));
-      clearTimeout(this.pendTimer);
-      this.pendTimer = setTimeout(() => {
-        this.pending = false;
-        this.draft = null;   // 交回服务端值；若服务端没接受，会如实跳回
-      }, 1200);
-    },
+    pct() { return (this.ratio * 100).toFixed(3) + '%'; },
+    /* 左段填充：ratio=0 时整块隐藏，否则 0 宽度的边框会画出一个小竖条 */
+    fillStyle() { return { width: this.pct, opacity: this.ratio > 0 ? 1 : 0 }; },
   },
 };
 </script>
@@ -75,19 +57,32 @@ export default {
 <style scoped>
 .dc-row { min-width: 0; }
 .dc-range { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 8px; }
-.dc-label { font-size: 12px; color: var(--ink2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dc-val { font-size: 12px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.dc-val i { font-size: 10px; color: var(--ink2); font-style: normal; margin-left: 1px; }
-.dc-range input[type="range"] {
-  grid-column: 1 / -1; width: 100%; height: 18px; -webkit-appearance: none; appearance: none; background: none;
+/* 文字尺度与 home 对齐（13px）。轨道 20px / 把手 20×30 保持上一轮定稿不动 ——
+   它与 CSS 的 .dc-inner 内缩 10px 绑定，改了会脱钩。 */
+.dc-label { font-size: 13px; color: var(--ink2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dc-val { font-size: 13px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dc-val i { font-size: 11px; color: var(--ink2); font-style: normal; margin-left: 1px; }
+.dc-slider { grid-column: 1 / -1; position: relative; width: 100%; height: 34px; }
+/* 轨道两端内缩 10px（= 把手半宽），把手在端点也不会画出卡片外 */
+.dc-inner { position: absolute; left: 10px; right: 10px; top: 50%; height: 20px; transform: translateY(-50%); }
+/* 右半段 / 整条底轨：中性灰 */
+.dc-track {
+  position: absolute; inset: 0; z-index: 0; box-sizing: border-box;
+  border: 1.5px solid #dbe4f0; border-radius: 999px;
+  background: rgba(255, 255, 255, .6);
 }
-.dc-range input[type="range"]::-webkit-slider-runnable-track {
-  height: 4px; border-radius: 999px; background: #e3e9f2;
+/* 左侧已选段：主题色描边 + 淡色填充 */
+.dc-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 1; box-sizing: border-box;
+  border: 1.5px solid var(--blue); border-radius: 999px;
+  background: rgba(59, 130, 246, .14);
 }
-.dc-range input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--blue); border: 2px solid #fff; box-shadow: 0 1px 4px rgba(59,130,246,.45);
-  margin-top: -5px;
+/* 竖向椭圆把手：比轨道高，白底 + 蓝描边 */
+.dc-thumb {
+  position: absolute; top: 50%; z-index: 2; box-sizing: border-box;
+  width: 20px; height: 30px; border-radius: 999px;
+  background: #fff; border: 2px solid var(--blue); box-shadow: 0 1px 5px rgba(59, 130, 246, .25);
+  transform: translate(-50%, -50%);
 }
 .dc-range.dis { opacity: .45; }
 </style>
