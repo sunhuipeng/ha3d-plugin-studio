@@ -5,7 +5,7 @@
  *
  * 工具按域拆在 server/mcp/ 下（详见 mcp/helpers.js 头注释）。
  * 能力分三层，能共用的都压在底层，不做无谓的适配层：
- *   公共层（与项目类型无关）：页面定位 / 单窗口收敛 / 打开项目 / 列项目 / 配置锁；
+ *   公共层（与项目类型无关）：页面定位 / 单窗口收敛 / 打开项目 / 列项目 / 新建与复制项目 / 配置锁；
  *     模型文件操作（list / get / upload / delete / split / rename / fix materials / delete_models 批量）；
  *     视图与截图（studio_view / studio_screenshot / studio_reload）——插件页与家具页共用同一个
  *     ThreeHost（client/src/engine/three-host.js），前端只各自注册一个同形状预览门面，
@@ -40,6 +40,8 @@
  *   19. studio_lock_config    锁用户左侧面板（纯前端只读，刷新即解锁；同步同项目所有页面）
  *   20. studio_unlock_config  解除左侧面板只读（同步同项目所有页面）
  *   21. studio_get_lock       查前端锁状态（是否只读 / 谁锁的 / 同项目页面数）
+ *   21b. studio_create_project 新建项目（纯服务端，与 REST 共用 lib/project-ops.js）
+ *   21c. studio_copy_project   复制项目（整份配置 + models/，纯服务端，同上）
  *
  * 家具项目（kind:'catalog'）另有一套工具，见 mcp/tools-catalog.js：
  *   22. studio_list_catalog_items   列全部家具（纯列举，只返回 items 数组：每项含全量属性 + modelFile）
@@ -75,7 +77,7 @@ function buildMcpServer() {
 
   toolsConfig.register(server);     // 配置：读项目 / 快照 / 读写代码
   toolsPreview.register(server);    // 预览：切样式 / 调参数 / 点击 / 截图 / 体检
-  toolsProjects.register(server);   // 项目：列表 / 页面定位 / 单窗口 / 切换项目
+  toolsProjects.register(server);   // 项目：列表 / 新建 / 复制 / 页面定位 / 单窗口 / 切换项目
   toolsModels.register(server);     // 模型：上传 / 导出 / 列表 / 拆分 / 删改 / 材质修复
   toolsPublish.register(server);    // 发布：导出 zip / 远程安装
   toolsLock.register(server);       // 配置锁：加锁 / 解锁 / 查状态（人机互斥编辑）

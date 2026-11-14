@@ -1,11 +1,12 @@
 {
   "name": "ha3d-plugin-studio",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "description": "图形化 ha-3d-home 插件生成器（GLB 组装 + AI 逻辑生成）",
   "scripts": {
-    "serve": "node --watch --watch-preserve-output server/index.js",
+    "serve": "node server/index.js",
+    "watch": "node --watch --watch-preserve-output server/index.js",
     "push:image:arm64": "bash scripts/push-image.sh linux/arm64"
   },
   "dependencies": {

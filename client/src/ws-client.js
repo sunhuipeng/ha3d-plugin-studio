@@ -5,6 +5,7 @@
  * 服务端还可能发：
  *   { type:'refresh', what:'models' }                                → 局部刷新模型列表
  *   { type:'refresh', what:'catalog' }                               → MCP 改了家具清单：重拉配置覆盖内存 + 重载预览
+ *   { type:'refresh', what:'projects' }                              → MCP 新建 / 复制了项目：重拉项目列表
  *   { type:'mcp', event:'connected'|'activity'|'disconnected', tool? } → 顶部横条提示
  */
 import { watch } from 'vue';
@@ -639,7 +640,18 @@ const handlers = {
         error: d.error || '',
         loading: !!(pv.loading && pv.loading()),
         plugin: { id: d.pluginId || '', kind: d.kind || '', type: d.type || '', name: d.name || '' },
-        style: { current: d.styleId || '', all: d.styles || [] },
+        /* 样式清单：引擎注册的（插件代码里声明的）优先；代码为空 / 没注册任何样式时
+         * 退回项目配置里的 styles，避免与 studio_get_project 的口径对不上
+         * （否则空代码项目 get_project 有样式、get_runtime 却是空，AI 会误判配置丢失）。
+         * source 标明清单来源：plugin = 代码注册生效中 / config = 仅项目配置（代码还没吃进去） */
+        style: {
+          current: d.styleId || '',
+          all: (d.styles && d.styles.length) ? d.styles
+            : ((S.proj && S.proj.styles) || []).filter((s) => s && s.id)
+              .map((s) => ({ id: s.id, name: s.name || s.id })),
+          source: (d.styles && d.styles.length) ? 'plugin'
+            : (((S.proj && S.proj.styles) || []).some((s) => s && s.id) ? 'config' : 'none'),
+        },
         instance: d.instance || null,
         size: d.size || null,
         label: d.label || '',
@@ -736,6 +748,11 @@ async function onMessage(ev) {
   if (msg.type === 'refresh') {
     if (msg.what === 'catalog') {
       await refreshCatalogFromServer(msg);
+      return;
+    }
+    if (msg.what === 'projects') {
+      /* MCP 新建 / 复制项目：只重拉项目列表，不打断当前编辑页 */
+      try { await act.loadProjects(); } catch (e) { /* ignore */ }
       return;
     }
     if (msg.what === 'models') {

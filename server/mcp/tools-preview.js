@@ -15,7 +15,20 @@ const H = require('./helpers');
 const COMMON_RELAY = new Set(['reload', 'view', 'screenshot']);
 async function relay(pid, name, args, timeout) {
   if (!COMMON_RELAY.has(name)) H.assertPluginProject(pid);
-  return hub.call(pid, name, args, timeout);
+  try {
+    return await hub.call(pid, name, args, timeout);
+  } catch (e) {
+    /* 调用流程口径：项目没在前端打开时，直接告诉调用方「先 studio_open_project 再打这个工具」，
+     * 而不是让他对着「请先在浏览器打开编辑页」自己去猜要调哪个工具。
+     * 注意这不是自动开项目 —— 打开项目始终是调用方的一步明确动作。 */
+    if (e.code === 'NO_FRONTEND') {
+      throw Object.assign(new Error(
+        `项目 ${pid} 没有在前端打开。正确顺序：先 studio_open_project({ "projectId": "${pid}" }) 打开它，`
+        + `成功返回后再调用 studio_${name}`,
+      ), { code: e.code });
+    }
+    throw e;
+  }
 }
 
 function register(server) {
@@ -119,7 +132,8 @@ function register(server) {
   server.tool(
     'studio_view',
     '只调整观看方式、不出图（插件页 / 家具页通用，共用 ThreeHost 的相机实现）：转模型 / 移模型 / 归位，或转相机 / 平移 / 缩放。'
-    + '家具页可传 itemId 先选中左侧清单里的某件家具（等价点击清单项，会等 GLB 加载完）。排查问题时先用它把姿态摆到看得清的位置，再调 studio_screenshot 按角度拍',
+    + '家具页可传 itemId 先选中左侧清单里的某件家具（等价点击清单项，会等 GLB 加载完）。排查问题时先用它把姿态摆到看得清的位置，再调 studio_screenshot 按角度拍'
+    + '。前置：目标项目必须已在前端打开 —— 不是当前项目时先 studio_open_project 再调本工具',
     {
       projectId: z.string().optional(),
       itemId: z.string().optional().describe('家具页专用：先选中这件家具再摆姿态（等价于点击左侧清单；条目 id 见 studio_list_catalog_items）'),
@@ -157,7 +171,8 @@ function register(server) {
     'studio_screenshot',
     '截图返回 PNG（插件页 / 家具页通用，共用 ThreeHost 的离屏渲染）：截当前 3D 预览的真实渲染结果。'
     + '可指定视角预设、绝对机位、相对旋转/平移/缩放，也可以先把模型整体转一下再拍；'
-    + '家具页可传 itemId 一步完成「选中清单某件 → 等模型加载 → 按指定机位截图」',
+    + '家具页可传 itemId 一步完成「选中清单某件 → 等模型加载 → 按指定机位截图」。'
+    + '前置：目标项目必须已在前端打开 —— 传的 projectId 不是当前打开的项目时，先 studio_open_project 打开它再截图',
     {
       projectId: z.string().optional(),
       itemId: z.string().optional().describe('家具页专用：先选中这件家具、等 GLB 加载完再拍（避免拍到切换瞬间的空场景）'),

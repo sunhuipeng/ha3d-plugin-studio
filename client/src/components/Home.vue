@@ -7,6 +7,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Plus, Setting, Upload, Connection } from '@element-plus/icons-vue';
 import { useStudio } from '../stores';
+import { copyText } from '../lib/clipboard';
 const { act, project, ui } = useStudio();
 
 /* ---- 新建项目（虚线卡片 → 弹窗：先选类型 kind，再填名称） ----
@@ -199,18 +200,11 @@ function openMcp() {
 
 async function copyMcp() {
   if (!mcpInfo.value) return;
-  const text = mcpText.value;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    /* http + 非 localhost 不是安全上下文，没有 clipboard API：退化成选中 textarea 复制 */
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); } catch (err) { /* 复制失败也不阻断，用户可手动选中 */ }
-    ta.remove();
+  /* 复制实现统一走 lib/clipboard（含 http 非 localhost 的 execCommand 兜底），
+     编辑页顶栏复制项目 id 用的是同一份；失败时明确提示，不再静默报「已复制」 */
+  if (!(await copyText(mcpText.value))) {
+    ElMessage.error('复制失败，请手动选中配置文本复制');
+    return;
   }
   mcpCopied.value = true;
   ElMessage.success('MCP 配置已复制');

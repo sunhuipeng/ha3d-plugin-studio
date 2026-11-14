@@ -28,6 +28,8 @@
  *   · 取不到 state / unavailable / unknown → 禁用
  *   · 插件没返回 cards()：可点击（有 click / 内置默认）→ 兜底一张单元素 switch 卡（复用插件 click）；
  *     纯展示类型（无可点）→ 不出卡
+ *   · 插件写了 cards() 但控件全被过滤（字段一个没绑 / 实体没那些属性）→ 一个元素都没有时
+ *     按「单元素」处理，退回同一张兜底卡（不出现空白子卡）
  *
  * ── 插件 cards(ctx) 的返回格式：只返回数组，不再用 type 区分 ──────────
  *   single → [ {…} ]                      一维数组、只有一个控件对象
@@ -37,9 +39,10 @@
  * 不可点击（纯展示类型）→ 不出卡，由调用方过滤掉。
  *
  * **单元素平铺**：所有 single 卡会被容器层收集起来，与「其它插件返回的单个元素」
- * 合成一个 grid 块，中间夹了 group 卡就断开。块内每位占几列由渲染层 CardDevices
- * 按「本块元素数 + 各自 columns」统一算：整块只有 1 个 → 全宽；多个 → 显式 columns
- * 优先，未配置的默认占 2 列（半行）。写 columns:1 一行最多 4 个、写 4 独占一行。
+ * 统一合并成一个 grid 块、固定放在多控件子卡前面（不分出现顺序）。块内每位占几列
+ * 由渲染层 CardDevices 按「本块元素数 + 各自 columns」统一算：整块只有 1 个 → 全宽；
+ * 多个 → 显式 columns 优先，未配置的默认占 2 列（半行）。写 columns:1 一行最多 4 个、
+ * 写 4 独占一行。
  *
  * 控件字段池（任何 type 都能带，引擎按 type 各取所需）：
  *   type     switch | bool | range | select | choice | label | button
@@ -65,11 +68,19 @@
  *            · 一行里部分写、部分没写 → 写了的按指定宽度，剩下的列由没写的控件平分（每个至少 1 列）。
  *            · single 卡（与其它插件的单元素一起平铺）→ 不写时占列由渲染层按块决定
  *              （块内只有 1 个成全宽、多个默认 2 列）；写 1 = 一行最多 4 个，写 4 = 独占一行。
- *   min / max / step             range 边界（可写 'attr:min_temp'）
+ *   min / max / step             range 边界。可写死，也可写 'attr:min' / 'attr:max' / 'attr:step'
+ *                                从实体属性取（input_number 倒计时滑块就这么写），取不到回退 0 / 100 / 1
  *   option / options             select / choice 选项，4 种写法：[{value,label}] /
  *                               纯值数组 / 对象映射 / 'attr:hvac_modes'（详见 PLUGIN-DEV.md §2.9）；
  *                               label 控件仅在做枚举状态中文映射时才用它（少见）
- *   require  'attr名'：实体没有该属性就不渲染这个控件
+ *   require  过滤条件，两种口径（先按字段判、再按属性判）：
+ *            · 实例字段名（插件 fields 声明的 key，如 'powerEntity'）：**绑了才渲染**；
+ *            · 实体属性名（如 'current_position'）：实体没有该属性就不渲染。
+ *            用来避免「字段没绑 / 实体没这属性」时出一个点不动的假控件
+ *   lock     true：只有「本控件所属设备开启」才可操作。关机时控件仍渲染、仍显示值，
+ *            但 decorate 把 _disabled 置 true → 组件灰化 / 原生元素 disabled，
+ *            actionOf 也拒绝发服务。判定走 env.isOn(节点 _powerEid，即设备主实体)，
+ *            与标题电源开关同口径；⚠ 别标在开机入口（含 off 的模式组、电源 switch）上。
  *   （开 / 关 电源开关不写在 cards() 里：它统一由渲染层画在设备标题右侧，
  *    完全复用插件自身的 isOn 与 click —— 见 CardPowerToggle / HA.toggle。
  *    显隐与 cards() 无关，只看 instanceClickSpec 是否非 null：插件 defaultOn:false
@@ -106,6 +117,21 @@ function toNum(v) {
 function toBool(v) {
   if (typeof v === 'string') return v === 'true' || v === 'on' || v === '1' || v === 'yes';
   return !!v;
+}
+
+/* require 判定：字段层优先，属性层次之。
+ *   · 字符串是实例字段（插件 fields 声明的 key，值 = 绑定的实体 id）→ 看绑没绑；
+ *     obj 上就算有这个 key，值空串 / null / false 也算没绑（属性面板清空后写的就是 ''）
+ *   · 否则当实体属性名 → 实体暴露了该属性才通过
+ * 两种口径都命中不了就丢弃这个控件（与 resolveKey 失败同一条路径，不是运行时报错）。 */
+function requireOk(req, env, st) {
+  if (!req) return true;
+  const obj = env && env.obj;
+  if (obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, req)) {
+    const v = obj[req];
+    return typeof v === 'string' ? v !== '' : (v != null && v !== false);
+  }
+  return !!(st && st.attributes && st.attributes[req] !== undefined);
 }
 
 /* key → entity_id。'entity' / 'entityId' 都是主实体（door/window 的 fields 键就叫 entityId） */
@@ -166,15 +192,18 @@ function layoutRow(row) {
 }
 
 const KEEP = ['type', 'key', 'attr', 'action', 'param', 'domain', 'data', 'label',
-  'unit', 'min', 'max', 'step', 'option', 'options', 'require', 'columns'];
+  'unit', 'min', 'max', 'step', 'option', 'options', 'require', 'columns', 'lock'];
 
 function normalizeNode(spec, env) {
   if (!spec || typeof spec !== 'object' || TYPES.indexOf(spec.type) < 0) return null;
   const eid = resolveKey(spec.key, env);
   if (!eid) return null;                          // 绑不到实体 → 这个控件不渲染
   const st = env.getState ? env.getState(eid) : null;
-  if (spec.require && (!st || !st.attributes || st.attributes[spec.require] === undefined)) return null;
-  const n = { _eid: eid, _explicit: spec.columns !== undefined };
+  if (!requireOk(spec.require, env, st)) return null;
+  /* lock 要判的是「设备主实体开没开」，不能用本控件的 _eid —— 它可能是 fields 绑的
+   * 扩展实体（如湿度 sensor，永远判不出开态）。decorate 阶段的 env 只有
+   * { getState, isOn }、没有 entityId，所以趁建树时把主实体 id 存进节点。 */
+  const n = { _eid: eid, _powerEid: env.entityId || eid, _explicit: spec.columns !== undefined };
   KEEP.forEach((k) => { if (spec[k] !== undefined) n[k] = spec[k]; });
   n.columns = clampInt(n.columns, 1, COLS);
   /* button 没写 label 时用服务名兜底；label 是纯显示，不参与服务相关处理 */
@@ -224,9 +253,16 @@ function decorateNode(node, env) {
   }
 
   const st = env && env.getState && node._eid ? env.getState(node._eid) : null;
+  /* 原有禁用（实体取不到 / unavailable / unknown）恒生效；lock 只是附加条件：
+   * OR 而不是替换 —— HA 掉线时不能反而放开控件。env.isOn 缺失时保守按「关」处理。
+   * _powerEid 由 normalizeNode 注入（设备主实体），solo 平铺 / 浅拷贝都会带过来。 */
+  const baseDisabled = !st || st.state === 'unavailable' || st.state === 'unknown';
+  const powerEid = node._powerEid || node._eid;
+  const locked = toBool(node.lock)
+    && !(env && env.isOn && powerEid ? env.isOn(powerEid) : false);
   const out = Object.assign({}, node, {
     _has: !!st,
-    _disabled: !st || st.state === 'unavailable' || st.state === 'unknown',
+    _disabled: baseDisabled || locked,
     _state: st ? st.state : '',
   });
   const raw = readValue(out, st);
@@ -270,27 +306,29 @@ export const CardEngine = {
     return node ? (COMPONENTS[node.type] || '') : '';
   },
 
+  /* 实例级可点击判定 —— buildCard 的两个兜底分支（没写 cards / cards 全被过滤）共用。
+   * 调用方给了 env.clickable 就以它为准；没给才回退 window.PluginEngine.instanceClickSpec
+   * （studio 侧没有该全局，所以 studio 调用 buildCard 必须显式传 clickable）。 */
+  _clickable(env) {
+    const e = env || {};
+    if (e.clickable !== undefined) return !!e.clickable;
+    const pe = (typeof window !== 'undefined' && window.PluginEngine);
+    if (!pe || typeof pe.instanceClickSpec !== 'function') return false;
+    return !!pe.instanceClickSpec(e.obj || { entityId: e.entityId, style: e.style },
+      e.type || domainOf(e.entityId || ''));
+  },
+
   /* 单台设备：插件 cards() → 卡片结构。
    * 没声明 cards() 时：
    *   · 插件可点击（有 click / 内置默认 → clickSpec 非 null）→ 兜底一张「单元素 switch」卡，
    *     完全复用插件自身的 click（点击走 HA.toggle，见 useCards.run 的 _defaultToggle 分支）；
    *   · 完全不可点（clickSpec 为 null）→ 不出卡（null，调用方丢弃）。
-   * 声明了 cards() 但控件全被过滤 / 全是电源开关（已移到标题）→ 允许「标题独卡」（rows 为空，
-   * 标题右侧由渲染层画电源开关，见 CardPowerToggle）。 */
+   * 声明了 cards() 但**控件全被过滤**（字段都没绑 / 实体没那些属性 / 全是电源开关）→ 一个元素都没有：
+   * 按「单元素」处理，退回与「没写 cards()」完全相同的默认兜底卡（容器层当 solo 平铺）；
+   * 只有不可点击的纯展示类型才保留「标题独卡」（rows 为空，没别的能给它）。 */
   buildCard(env) {
     const raw = env && env.cards;
-    if (!raw) {
-      const clickable = env.clickable !== undefined
-        ? env.clickable
-        : (() => {
-            /* 兜底：没有调用方给 clickable 时用实例级门控（click / clickSvc / defaultOn 全算） */
-            const pe = (typeof window !== 'undefined' && window.PluginEngine);
-            if (!pe || typeof pe.instanceClickSpec !== 'function') return false;
-            return !!pe.instanceClickSpec(env.obj || { entityId: env.entityId, style: env.style },
-              env.type || domainOf(env.entityId || ''));
-          })();
-      return clickable ? this.defaultToggleCard(env) : null;
-    }
+    if (!raw) return this._clickable(env) ? this.defaultToggleCard(env) : null;
     const parsed = toRows(raw);
     const rows = parsed.rows
       .map((r) => r.map((s) => normalizeNode(s, env)).filter(Boolean))
@@ -300,6 +338,7 @@ export const CardEngine = {
     /* 单元素（solo）的占列不在这里定：它可能和其它设备的单元素聚合成一个网格块，
      * 具体每位占几列由渲染层 CardDevices 按「本块元素数 + 各自 columns」统一算
      * （1 个 → 全宽；多个 → 显式 columns 优先、未配置默认 2）。这里只保留 _explicit / columns。 */
+    if (!flat.length && this._clickable(env)) return this.defaultToggleCard(env);
 
     const st = env.getState && env.entityId ? env.getState(env.entityId) : null;
     const fn = st && st.attributes && st.attributes.friendly_name;
@@ -319,7 +358,8 @@ export const CardEngine = {
     };
   },
 
-  /* 兜底卡：插件没写 cards() 但可点击时，出一张「单元素 switch」卡。
+  /* 兜底卡：插件没写 cards()、或 cards() 的控件全被过滤（一个元素都不剩）但可点击时，
+   * 出一张「单元素 switch」卡。
    * 控件不写真实 action（引擎 actionOf 会因无 action 返回 null、不可点），
    * 改用 _defaultToggle 标记，由渲染层点击时走 HA.toggle 复用插件 clickSpec
    * （字符串 / 函数两种形态都支持，与标题电源开关完全一致）。 */
@@ -363,21 +403,23 @@ export const CardEngine = {
   },
 
   /* 容器层：一个卡头 + 若干块。
-   * · 所有插件返回的「单个元素」按出现顺序聚合成 grid 块，按各自 columns 在 4 列里平铺；
-   *   中间夹了多控件设备就断开，下一批单元素另起一个 grid 块。
-   * · 多控件设备各自成一张完整子卡。 */
+   * · 所有插件返回的「单个元素」**不分出现顺序**统一合并成一个 grid 块，固定放在最上面
+   *   （兜底单开关 / 单控件设备视觉上是一排胶囊按钮，聚在一处才不会散落在多控件卡之间）；
+   *   块内按出现顺序平铺，各占各的 columns。
+   * · 多控件设备各自成一张完整子卡，按原顺序排在单元素块后面。 */
   buildListCard(o) {
-    const blocks = [];
+    const soloItems = [];
+    const cardBlocks = [];
     (o.cards || []).filter(Boolean).forEach((card) => {
       if (card._solo) {
-        const last = blocks[blocks.length - 1];
-        const item = Object.assign({}, card.flat[0], { _title: card.title, _entityId: card._entityId });
-        if (last && last.kind === 'grid') last.items.push(item);
-        else blocks.push({ kind: 'grid', columns: COLS, items: [item] });
+        soloItems.push(Object.assign({}, card.flat[0], { _title: card.title, _entityId: card._entityId }));
       } else {
-        blocks.push({ kind: 'card', card });
+        cardBlocks.push({ kind: 'card', card });
       }
     });
+    const blocks = soloItems.length
+      ? [{ kind: 'grid', columns: COLS, items: soloItems }].concat(cardBlocks)
+      : cardBlocks;
     return {
       type: 'list',
       title: o.title || '未命名',

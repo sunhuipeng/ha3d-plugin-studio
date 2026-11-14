@@ -361,21 +361,29 @@ export class PluginPreview {
     /* 门/窗没有「实体绑定」，entityId 只是指向门磁字段的别名，不标成主实体 */
     const isWall = !!(def && isWallType(def.type));
     const out = [];
+    /* 字段定义与 _defineEntities() 同口径：代码声明 ∪ 项目配置（面板里加的以项目为准）。
+       不合并项目配置的话，只在面板里新增的字段拿不到 label / fieldKey —— 界面会退化成
+       显示实体 id 尾名，也无法按 fieldKey 认出 ratio 语义。 */
+    const byKey = new Map();
+    ((def && def.fields) || []).forEach((f) => { if (f && f.key) byKey.set(f.key, f); });
+    ((this.project && this.project.fields) || []).forEach((f) => {
+      if (f && f.key) byKey.set(f.key, f);
+    });
     (this.ha.list() || []).forEach((e) => {
       let role = 'field';
       if (main && e.entityId === main && !isWall) role = 'main';
       let label = '';
       let fieldKey = '';
       let fieldTip = '';
-      (def && def.fields || []).forEach((f) => {
-        if (this.obj && f && this.obj[f.key] === e.entityId) {
-          label = f.label || f.key;
-          fieldKey = f.key;
+      byKey.forEach((f, key) => {
+        if (this.obj && this.obj[key] === e.entityId) {
+          label = f.label || key;
+          fieldKey = key;
           fieldTip = f.tip || '';
         }
       });
       if (role === 'main') label = '主实体';
-      /* fieldKey 让界面能判断这个字段是「开关量」还是「百分比」 */
+      /* fieldKey / domain 让界面判断这个实体是数值、百分比还是开关量 */
       out.push({ ...e, role, label, fieldKey, fieldTip });
     });
     return out;
@@ -687,7 +695,9 @@ export class PluginPreview {
       camera: this.host ? this.host.cameraState() : null,
       model: this.host ? this.host.modelState() : null,
       entities: this.listEntities(),
-      modelUrlBase: this.modelUrl('models/x.glb'),
+      /* 模型目录基址：base + 文件名 = 下载地址。早期是 .../models/x.glb 这种带假文件名的
+       * 示例 URL，AI 会当成真实文件去下载 404 —— 改成纯目录基址（0 模型项目也成立） */
+      modelUrlBase: this.projectId ? `/api/projects/${this.projectId}/models/` : '',
     };
   }
 

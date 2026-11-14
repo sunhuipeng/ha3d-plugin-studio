@@ -8,7 +8,7 @@
  *   mcp/helpers.js         ← 本文件：输出格式 / 项目 id 解析 / 分项输出 / 活动横条
  *   mcp/tools-config.js    get_project / get_code / write_code
  *   mcp/tools-preview.js   set_style / set_option / click / label / reload / view / screenshot / set_entity / get_runtime
- *   mcp/tools-projects.js  list_projects / where / single_window / open_project
+ *   mcp/tools-projects.js  list_projects / create_project / copy_project / where / single_window / open_project
  *   mcp/tools-lock.js      lock_config / unlock_config / get_lock（前端只读锁，服务端只中继）
  *   mcp/tools-models.js    upload / get / list / split / delete / rename / fix_model_materials
  *   mcp/tools-publish.js   export_project / publish_project

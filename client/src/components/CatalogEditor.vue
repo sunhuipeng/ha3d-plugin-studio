@@ -16,6 +16,7 @@ import { useStudio } from '../stores';
 const { S, act, scheduleSave, toast, viewportApi, project, assets } = useStudio();
 import { prettyName } from '../catalog';
 import { ThreeHost } from '../engine/three-host';
+import ProjectTitle from './common/ProjectTitle.vue';
 
 const items = computed(() => (S.proj && S.proj.catalog && S.proj.catalog.items) || []);
 const types = computed(() => (assets.catalogTypes && assets.catalogTypes.length ? assets.catalogTypes : []));
@@ -296,9 +297,7 @@ async function doPublish(bump) {
     <!-- 顶栏：与插件编辑页同一套视觉，但动作只有家具包的（导入 / 导出 / 发布） -->
     <header id="topbar" class="cat-top">
       <el-button size="small" @click="back">← 项目</el-button>
-      <div class="proj-name">{{ S.proj ? S.proj.name + '  (' + S.proj.id + ')' : '' }}</div>
-      <span class="cat-badge">家具包 · {{ items.length }} 件</span>
-      <!-- 静态家具编辑页已接入 MCP：常驻徽标 + 悬停列出可用能力 -->
+      <!-- MCP 徽标与插件编辑页同款顺序：放在项目名左侧 -->
       <el-tooltip placement="bottom" :show-after="150">
         <template #content>
           <div style="max-width: 330px; font-size: 12px; line-height: 1.7">
@@ -313,6 +312,8 @@ async function doPublish(bump) {
         </template>
         <span class="mcp-badge">MCP 已接入</span>
       </el-tooltip>
+      <ProjectTitle :name="S.proj ? S.proj.name : ''" :id="S.proj ? S.proj.id : ''" />
+      <span class="cat-badge">家具包 · {{ items.length }} 件</span>
       <div class="spacer"></div>
       <div class="topbar-right">
         <span class="save-state">{{ S.saveState }}</span>

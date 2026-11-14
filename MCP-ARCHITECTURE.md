@@ -1,11 +1,11 @@
 # studio MCP 实现归属分析
 
-> 分析日期：2026-11-12。回答的问题：**MCP 的 42 个工具，哪些在服务端实现、哪些在前端实现、哪些前后端协作。**
+> 分析日期：2026-11-12。回答的问题：**MCP 的 44 个工具，哪些在服务端实现、哪些在前端实现、哪些前后端协作。**
 
 ## 整体链路
 
 ```
-MCP 客户端(WorkBuddy) ──SSE──▶ 服务端 mcp/sse.js + tools.js（42 工具注册）
+MCP 客户端(WorkBuddy) ──SSE──▶ 服务端 mcp/sse.js + tools.js（44 工具注册）
                                     │
                     ┌───────────────┼────────────────┐
               纯服务端执行      hub.call 中继        hub.notify 广播
@@ -22,11 +22,12 @@ MCP 客户端(WorkBuddy) ──SSE──▶ 服务端 mcp/sse.js + tools.js（42
 
 ---
 
-## 一、纯服务端实现（21 个）——浏览器不用开
+## 一、纯服务端实现（23 个）——浏览器不用开
 
 | 域 | 工具 | 服务端做什么 |
 |---|---|---|
 | projects | `studio_list_projects` | 读项目目录摘要 |
+| projects | `studio_create_project` / `studio_copy_project` | `lib/project-ops.js` 新建 / 深拷贝项目（整份配置 + `models/`），与 REST 路由共用一份实现；顺带 `hub.broadcast` 通知前端刷新项目列表，前端不在线也成功 |
 | config | `studio_get_project`、`studio_get_code` | readProject + generator 现场构建 plugin.js |
 | models | `studio_upload_model` / `studio_get_model` / `studio_list_models` / `studio_split_model` / `studio_delete_model` / `studio_delete_models` / `studio_rename_model` / `studio_fix_model_materials`（8 个） | 纯文件操作 + 返回完整 url 路径（不含主机端口，AI 拼 MCP 服务器地址自行下载），MCP 不写本机文件；仅 `splitGlb`（拆分）与 `fixGlbMaterials`（修材质）在服务端解析 GLB |
 | catalog | `studio_list_catalog_items` / `studio_get_catalog_item` / `studio_set_catalog_item` / `studio_upload_catalog_model` / `studio_delete_catalog_items` / `studio_get_catalog_types`（6 个） | 读写 project.json 的 `catalog.items`；`resolveCatalogTypes` 代理 home 的 `/api/catalog`。删家具（含单件）一律走 `studio_delete_catalog_items`（条目 + 模型文件 + 清单三处同步，`deleteModel:false` 只删条目），`studio_delete_models` 只对插件项目开放 |
@@ -81,7 +82,7 @@ MCP 客户端(WorkBuddy) ──SSE──▶ 服务端 mcp/sse.js + tools.js（42
 1. **前端 harness 是唯一真源**：凡涉及「渲染结果、运行期状态、页面 UI」的操作只能前端做——服务端没有 THREE 引擎，这类工具在页面没开时必然超时失败，这是设计使然。
 2. **混合工具的服务端前置**都是「读盘校验、别把明显错的参数发给浏览器白等超时」，例如 `set_style` 先查 styleId 在不在 styles 里。
 3. **锁和窗口管理完全在前端**：锁不落盘；多窗口 keeper 由前端 presence 选举。
-4. **42 个工具归属速记**：21 纯服务端 + 15 纯前端 + 6 前后端协作。改动某个行为前先按此表判断该落在哪一侧。
+4. **44 个工具归属速记**：23 纯服务端 + 15 纯前端 + 6 前后端协作。改动某个行为前先按此表判断该落在哪一侧。
 
 ## 排查时的注意点（给以后的维护者）
 

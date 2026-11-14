@@ -6,7 +6,7 @@
 
 ## 核心能力
 
-### 1. MCP 能力（42 个工具）
+### 1. MCP 能力（44 个工具）
 
 服务内置 MCP Server（SSE 传输），连接地址：
 
@@ -16,7 +16,7 @@ http://localhost:8098/mcp/sse
 
 在 WorkBuddy 等支持 MCP 的客户端中添加该地址即可。启动页右下角的 **⛓ MCP 接入** 按钮会展示 `mcpServers` 配置供一键复制 —— 这份 JSON 由服务端 `GET /api/mcp-config` 拼装（端口取启动时的 `PORT`、主机名取请求 Host；开发模式下前端在 Vite 端口，接口会自动换回服务端口），客户端不写死任何端口。
 
-> 42 个工具各自的实现归属（纯服务端 / 纯前端 / 前后端协作）见 [MCP-ARCHITECTURE.md](./MCP-ARCHITECTURE.md)。
+> 44 个工具各自的实现归属（纯服务端 / 纯前端 / 前后端协作）见 [MCP-ARCHITECTURE.md](./MCP-ARCHITECTURE.md)。
 
 工具一览（按用途排列）：
 
@@ -33,6 +33,8 @@ http://localhost:8098/mcp/sse
 | `studio_get_lock` | 查当前锁状态（是否锁着、谁锁的） |
 | `studio_render` | 立刻重新渲染：重跑插件代码 + 按当前配置合并后重建场景，返回样式 / 实体 / 参数实际取值。只重渲不写盘；`refreshConfig:true` 先从服务器重读配置，`view` 可套用视角预设 |
 | `studio_list_projects` | 列出所有项目（id / 名称 / 类型 / 模型数） |
+| `studio_create_project` | **新建项目**：传 `name` + `kind`（device / background / catalog，创建后不可改），返回新项目 id；默认立即在编辑页打开，纯服务端实现、不要求页面在线 |
+| `studio_copy_project` | **复制项目**：深拷贝配置 + `models/` 目录，返回副本 id；默认只刷新项目列表、不切走当前页面 |
 | `studio_where` | 当前编辑页停在哪：启动页（`page:"home"`）/ 项目编辑页（返回 `projectId`）/ 没打开页面（`"none"`），判断依据是 URL 路由 `#/project/<id>`；`tabs` 列出每个标签页的 `clientId` / 可见 / 聚焦 |
 | `studio_single_window` | **单窗口收敛**：同时开着多个标签页时，MCP 操作会在它们之间乱跳。先问一遍所有连接「谁可见/有焦点」，挑一个保留（有焦点 > 可见 > 最近连上，可用 `keepClientId` 指定，`projectId` 限定范围），其余前端收到关闭指令后自动断开中继并关掉页面；不认指令的旧页面由服务端兜底断开。`dryRun` 只列计划 |
 | `studio_open_project` | 让编辑页切换到指定项目（URL 直跳） |

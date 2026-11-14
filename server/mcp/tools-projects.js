@@ -1,8 +1,11 @@
-/* 项目/页面域工具：list_projects / where / single_window / open_project */
+/* 项目/页面域工具：
+ *   list_projects / create_project / copy_project / where / single_window / open_project
+ * 新建与复制的实现在 lib/project-ops.js，与 REST 路由（routes/projects.js）共用一份。 */
 'use strict';
 
 const { z } = require('zod');
 const { listProjectSummaries, readProject, safeId } = require('../lib/config');
+const { createProject, copyProject } = require('../lib/project-ops');
 const hub = require('../lib/ws-hub');
 const H = require('./helpers');
 
@@ -24,6 +27,93 @@ function register(server) {
           updatedAt: p.updatedAt,
         }));
         return H.text({ count: items.length, items });
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  /* 新建项目：与启动页「新建项目」按钮同一套实现（lib/project-ops.js）。
+   * 纯服务端即可完成，不要求前端在线；open=true 时才顺带让编辑页切过去。 */
+  server.tool(
+    'studio_create_project',
+    '新建项目（与启动页「新建项目」等价）：创建 device / background 插件项目或 catalog 家具包项目，返回新项目 id。'
+      + 'kind 创建时定死、之后不可更改；新项目没有代码，接着用 studio_write_code 写插件代码（家具包用 studio_upload_catalog_model）。'
+      + '新建后广播刷新前端项目列表；open 默认 true（让编辑页立即打开新项目），没有前端在线也不影响创建结果。',
+    {
+      name: z.string().optional().describe('项目名称（最长 60 字；省略 = 未命名插件 / 未命名家具包）'),
+      kind: z.enum(['device', 'background', 'catalog']).optional()
+        .describe('项目类型，创建后不可更改：device=设备/门窗插件（默认）、background=背景插件、catalog=家具包'),
+      open: z.boolean().optional().describe('新建后是否让编辑页立即打开该项目（默认 true；页面没开或打开失败不影响创建结果）'),
+    },
+    async ({ name, kind, open } = {}) => {
+      try {
+        const proj = createProject({ name, kind });
+        const out = {
+          ok: true,
+          projectId: proj.id,
+          name: proj.name,
+          kind: (proj.plugin && proj.plugin.kind) || 'device',
+          pluginId: (proj.plugin && proj.plugin.id) || proj.id,
+          note: 'kind 创建后不可更改；新项目还没有代码，接下来 studio_get_code / studio_write_code 写插件代码（家具包走家具工具）',
+        };
+        out.notified = hub.broadcast({ type: 'refresh', what: 'projects' });
+        if (open !== false) {
+          try {
+            await hub.callAny('open_project', { projectId: proj.id }, 30000);
+            out.opened = true;
+          } catch (e) {
+            out.opened = false;
+            out.openHint = '项目已创建，但没有前端页面可切换；页面打开后用 studio_open_project 打开它';
+          }
+        } else {
+          out.opened = false;
+        }
+        return H.text(out);
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  /* 复制项目：深拷贝整份 project.json + models/ 目录，与启动页「复制项目」等价。 */
+  server.tool(
+    'studio_copy_project',
+    '复制项目（与启动页「复制项目」等价）：深拷贝源项目的全部配置（styles / fields / customJs / catalog.items）与 models/ 目录，返回新项目 id。'
+      + '副本的 plugin.id / plugin.name 会自动改成新 id / 新名字，但 plugin.js 里写死的 register.id / register.name 不会自动改，'
+      + '复制后请用 studio_get_code + studio_write_code 对齐。默认只创建并刷新前端项目列表（open=false），不打断当前编辑页。',
+    {
+      projectId: z.string().optional().describe('源项目 id；省略时用当前编辑页唯一打开的项目（见 studio_list_projects / studio_where）'),
+      name: z.string().optional().describe('副本名称（省略 = <源项目名> 副本）'),
+      open: z.boolean().optional().describe('是否立即让编辑页打开副本（默认 false，只创建 + 刷新项目列表，不切走当前页面）'),
+    },
+    async ({ projectId, name, open } = {}) => {
+      try {
+        let pid = projectId;
+        if (!pid) {
+          try { pid = H.resolveProjectId(); }
+          catch (e) { throw new Error('省略 projectId 时需要有编辑页打开着项目；也可以直接传 projectId（见 studio_list_projects）'); }
+        }
+        if (!safeId(pid)) throw new Error('项目 id 不合法');
+        const copy = copyProject({ sourceId: pid, name });
+        const out = {
+          ok: true,
+          sourceProjectId: pid,
+          projectId: copy.id,
+          name: copy.name,
+          kind: (copy.plugin && copy.plugin.kind) || 'device',
+          pluginId: (copy.plugin && copy.plugin.id) || copy.id,
+          note: '副本已含源项目的代码与模型；plugin.js 里写死的 register.id / name 需手动对齐新项目',
+        };
+        out.notified = hub.broadcast({ type: 'refresh', what: 'projects' });
+        if (open) {
+          try {
+            await hub.callAny('open_project', { projectId: copy.id }, 30000);
+            out.opened = true;
+          } catch (e) {
+            out.opened = false;
+            out.openHint = '副本已创建，但没有前端页面可切换；页面打开后用 studio_open_project 打开它';
+          }
+        } else {
+          out.opened = false;
+        }
+        return H.text(out);
       } catch (e) { return H.fail(e.message); }
     },
   );

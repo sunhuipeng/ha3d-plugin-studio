@@ -19,6 +19,11 @@ const DOMAIN_DEFAULTS = {
   camera: { state: 'idle', attributes: { friendly_name: '预览摄像头' } },
   binary_sensor: { state: 'off', attributes: { friendly_name: '预览门磁', device_class: 'door' } },
   sensor: { state: '0', attributes: { friendly_name: '预览传感器', unit_of_measurement: '' } },
+  /* 数值域：min/max/step 给 cards() 的 'attr:min' / 'attr:max' / 'attr:step' 用。
+     缺了它们，倒计时这类 range 卡片只能回退 0/100/1，滑块范围看着就不对。
+     字段面板写的 attributes YAML 会覆盖这些默认值。 */
+  'input_number': { state: '0', attributes: { friendly_name: '预览数值', min: 0, max: 120, step: 1, unit_of_measurement: 'min' } },
+  counter: { state: '0', attributes: { friendly_name: '预览计数器', unit_of_measurement: '' } },
   /* 背景插件 onData 常用：天气实体给一个可直接用于「晴 / 雨」判定的初始状态 */
   weather: { state: 'sunny', attributes: { friendly_name: '预览天气', temperature: 22, humidity: 50 } },
   number: { state: '0', attributes: { friendly_name: '预览数值' } },

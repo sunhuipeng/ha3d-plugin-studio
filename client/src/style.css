@@ -352,13 +352,43 @@ textarea:not([class]) {
 @keyframes pub-rotate { to { transform: rotate(360deg); } }
 @keyframes pub-breathe { 50% { opacity: 0.65; } }
 
+/* 顶栏项目名：点击复制项目 id（ProjectTitle 组件，两类编辑页共用）。
+   原本是纯文本 div，现在是可点按钮 —— 清掉按钮默认样式保持原视觉；
+   「⧉ 复制 id」固定占位、只在 hover / 复制成功时显形，避免顶栏布局抖动。 */
 .proj-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--fg-dim);
   white-space: nowrap;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.proj-name:disabled { cursor: default; opacity: .6; }
+.proj-name:hover { color: var(--fg); }
+.proj-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.proj-title-text {
+  max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 280px;
+  white-space: nowrap;
 }
+.proj-copy-hint {
+  width: 56px;
+  flex: none;
+  font-size: 11px;
+  color: #98a2b3;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.proj-name:hover .proj-copy-hint,
+.proj-name.copied .proj-copy-hint { opacity: 1; }
+.proj-name.copied, .proj-name.copied .proj-copy-hint { color: #1a8a5a; }
 
 .save-state {
   font-size: 11px;
@@ -1321,6 +1351,23 @@ textarea:not([class]) {
   min-width: 46px;
 }
 .pv-ent-val:hover { border-color: var(--accent); color: var(--accent); }
+/* 数值域实体：同一个位置换成输入框（sensor / number / input_number / counter）。
+   不设 min/max，功率 850 W 这类读数不能被边界挡住；步长取实体 attributes.step。 */
+.pv-ent-num {
+  width: 62px; min-width: 62px;
+  padding: 1px 5px;
+  text-align: right;
+  cursor: text;
+  background: #eef4ff;
+  color: #2f6bbf;
+  outline: none;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.pv-ent-num::-webkit-outer-spin-button,
+.pv-ent-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.pv-ent-num:hover, .pv-ent-num:focus { border-color: var(--accent); color: var(--accent); }
+.pv-ent-unit { font-size: 10px; color: #98a2b3; min-width: 12px; }
 /* 背景参数：安全范围 长/宽/高 数字输入（支持滚轮快速调整） */
 .pv-safe-inputs { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .pv-safe-item {

@@ -4,7 +4,7 @@
  * 用移植过来的插件引擎把「当前项目生成的 plugin.js」真正跑起来：
  *   · 清空上一轮渲染 → 执行最新代码 → 重新渲染
  *   · 视角预设 / 鼠标旋转平移缩放 / 模型整体旋转移动
- *   · 模拟实体状态开关（改值 → 插件 update() → 画面变化）
+ *   · 模拟实体状态（开关点击切换 / 数值域直接填读数 → 插件 update() → 画面变化）
  *   · 右上角矩形 2D 平面预览
  *   · 任意视角离屏截图（供 MCP 观察）
  */
@@ -415,6 +415,12 @@ const WEATHER_TEXT = {
   fog: '雾', windy: '风', hail: '冰雹',
 };
 
+/* 数值域白名单：这些域的 state 是数字（功率 / 电压 / 电量 / 倒计时…）。
+ * ⚠ 判定只认 domain：它由 mock-ha 从实体 id 前缀解析、随 listEntities() 一起返回。
+ *   别按字段 key 或中文 label 猜类型 —— 自定义字段（fooEntity）一定会漏。
+ *   unit / min / max / step 从实体 attributes 取，字段面板的 YAML 属性可覆盖。 */
+const NUM_DOMAINS = new Set(['sensor', 'number', 'input_number', 'counter']);
+
 /* 实体开关：按域给一个「另一半」状态（设备类用） */
 function nextState(e) {
   const s = String(e.state || '');
@@ -427,13 +433,17 @@ function nextState(e) {
   return (s === 'on' || s === 'open') ? 'off' : 'on';
 }
 
-/* 字段语义：按 key 判断是百分比（开门比例）还是开关量（门磁） */
+/* 实体语义（决定左下角用什么控件）：
+ *   weather → 天气循环 / main → 主实体开关 / ratio → 百分比 0-50-100 循环
+ *   numeric → 数值域，直接输入任意读数 / binary → 其余二态（门磁 / 开关量）
+ * ratio 必须排在 numeric 前：开门比例常绑在 sensor 上，但按 fieldKey 才能认出百分比语义。 */
 const RATIO_KEY = /ratio|position|percent|pct|progress|angle/i;
 function entKind(e) {
   if (e.domain === 'weather') return 'weather';
   if (e.role === 'main') return 'main';
   const k = String(e.fieldKey || '');
   if (RATIO_KEY.test(k)) return 'ratio';
+  if (NUM_DOMAINS.has(String(e.domain || ''))) return 'numeric';
   return 'binary';
 }
 
@@ -441,14 +451,29 @@ function isOnText(s) {
   return s === 'on' || s === 'open' || s === '1' || s === 'true' || s === 'opening';
 }
 
-/* 给人看的显示值：门磁 → 开/关，比例 → 百分比 */
+/* 数值控件：步长取实体属性，没写就 'any'（不设 min/max —— 功率 850W 这类值不能被 0~120 卡住） */
+function entStep(e) {
+  const n = Number(e && e.attributes ? e.attributes.step : NaN);
+  return Number.isFinite(n) && n > 0 ? n : 'any';
+}
+
+/* 圆点高亮：数值 / 百分比看读数是否 > 0，其余仍按开关文案 */
+function entDotOn(e) {
+  const kind = entKind(e);
+  if (kind === 'ratio' || kind === 'numeric') return parseFloat(e.state) > 0;
+  return isOnText(String(e.state || ''));
+}
+
+/* 给人看的显示值：数值域 → 读数 + 单位，比例 → 百分比，门磁 → 开/关 */
 function entText(e) {
   const s = String(e.state == null ? '' : e.state);
   if (e.domain === 'weather') return WEATHER_TEXT[s] || s || '—';
-  if (entKind(e) === 'ratio') {
+  const kind = entKind(e);
+  if (kind === 'ratio') {
     const n = parseFloat(s);
     return isNaN(n) ? (s || '—') : Math.round(n) + '%';
   }
+  if (kind === 'numeric') return s ? s + (e.unit ? ' ' + e.unit : '') : '—';
   if (isOnText(s)) return '开';
   if (s === 'off' || s === 'closed' || s === 'closing' || s === '0' || s === 'false') return '关';
   return s || '—';
@@ -470,10 +495,28 @@ function toggleEntity(e) {
       next = WEATHER_SEQ[(i + 1 + WEATHER_SEQ.length) % WEATHER_SEQ.length];
     } else if (kind === 'binary') {
       next = isOnText(String(e.state || '')) ? 'off' : 'on';
+    } else if (kind === 'numeric') {
+      /* 数值域在模板里是输入框、不走这个按钮；真被调用时给个 0 ↔ 50 的档位兜底，
+         绝不能把 sensor 的读数写成 'on' / 'off' */
+      const n = parseFloat(e.state);
+      next = (isNaN(n) || n <= 0) ? '50' : '0';
     } else {
       next = nextState(e);
     }
     preview.setEntity(e.entityId, next);
+    entities.value = preview.listEntities();
+    syncStatus();
+  } catch (ex) { toast('改状态失败: ' + ex.message, true); }
+}
+
+/* 数值域直接改读数：与点击切换同一条链路（setEntity → updateAll → 插件 update() / 卡片值树刷新）。
+   输入中途的 '' / '-' / '.' 不推状态，等成一个合法数再落。 */
+function setEntityValue(e, v) {
+  if (!preview) return;
+  const s = String(v == null ? '' : v).trim();
+  if (!s || !Number.isFinite(Number(s))) return;
+  try {
+    preview.setEntity(e.entityId, s);
     entities.value = preview.listEntities();
     syncStatus();
   } catch (ex) { toast('改状态失败: ' + ex.message, true); }
@@ -753,10 +796,16 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
       </div>
 
       <div v-for="e in shownEntities" :key="e.entityId" class="pv-ent"
-        :title="e.entityId + (e.fieldTip ? '｜' + e.fieldTip : '') + '（点击切换）'">
-        <span class="pv-ent-dot" :class="{ on: entKind(e) === 'ratio' ? parseFloat(e.state) > 0 : isOnText(String(e.state || '')) }"></span>
+        :title="e.entityId + (e.fieldTip ? '｜' + e.fieldTip : '') + '｜当前 ' + entText(e) + (entKind(e) === 'numeric' ? '（可直接输入数值）' : '（点击切换）')">
+        <span class="pv-ent-dot" :class="{ on: entDotOn(e) }"></span>
         <span class="pv-ent-name">{{ e.role === 'main' ? '默认实体' : (e.label || e.name) }}</span>
-        <button class="pv-ent-val" @click="toggleEntity(e)">{{ entText(e) }}</button>
+        <template v-if="entKind(e) === 'numeric'">
+          <input class="pv-ent-val pv-ent-num" type="number" :step="entStep(e)"
+            :value="e.state" :aria-label="(e.label || e.name) + ' 数值'"
+            @change="setEntityValue(e, $event.target.value)">
+          <span v-if="e.unit" class="pv-ent-unit">{{ e.unit }}</span>
+        </template>
+        <button v-else class="pv-ent-val" @click="toggleEntity(e)">{{ entText(e) }}</button>
       </div>
 
       <template v-if="effectText">
@@ -767,7 +816,7 @@ watch(() => [(curStyle.value && curStyle.value.z), (curStyle.value && curStyle.v
         </div>
       </template>
 
-      <div class="pv-ent-tip">点击右侧的值可切换：设备走 update()，背景走顶层 onData(fields, api)</div>
+      <div class="pv-ent-tip">开关点击切换 · 数值直接输入；设备走 update()，背景走顶层 onData(fields, api)</div>
     </div>
 
     <!-- 安全范围（引擎画半透明占位长方体）——只有背景插件有「背景参数」这张卡 -->

@@ -8,6 +8,7 @@ import LeftRail from './components/LeftRail.vue';
 import PluginStage from './components/PluginStage.vue';
 import RightPanel from './components/RightPanel.vue';
 import CatalogEditor from './components/CatalogEditor.vue';
+import ProjectTitle from './components/common/ProjectTitle.vue';
 import { initWs } from './ws-client';
 
 /* 家具项目（kind: catalog）走独立的编辑页：没有代码/实体/样式，只有清单 + 预览 + 属性。
@@ -96,8 +97,7 @@ function onPublishCmd(cmd) {
     <template v-else>
       <header id="topbar">
         <el-button size="small" @click="onBack">← 项目</el-button>
-        <div class="proj-name">{{ project.proj ? project.proj.name + '  (' + project.proj.id + ')' : '' }}</div>
-        <!-- 插件编辑页已接入 MCP：常驻徽标 + 悬停列出常用能力（与家具页同款） -->
+        <!-- MCP 徽标放在项目名左侧：先看到「已接入」，再看到可点击复制 id 的项目名（与家具页同款顺序） -->
         <el-tooltip placement="bottom" :show-after="150">
           <template #content>
             <div style="max-width: 330px; font-size: 12px; line-height: 1.7">
@@ -109,6 +109,7 @@ function onPublishCmd(cmd) {
           </template>
           <span class="mcp-badge">MCP 已接入</span>
         </el-tooltip>
+        <ProjectTitle :name="project.proj ? project.proj.name : ''" :id="project.proj ? project.proj.id : ''" />
         <div class="spacer"></div>
         <!-- 右侧操作区：已保存 → 配置快照 → 发布，贴右边缘排布（右侧不留空白） -->
         <div class="topbar-right">

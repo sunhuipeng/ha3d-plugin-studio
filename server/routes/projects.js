@@ -7,10 +7,12 @@ const crypto = require('crypto');
 const express = require('express');
 const JSZip = require('jszip');
 const {
-  safeId, safeRemove, PROJECTS_DIR, modelsDir,
+  safeId, safeRemove, PROJECTS_DIR,
   readProject, writeProject, listProjectSummaries,
 } = require('../lib/config');
-const { newCatalogProject, normalizeCatalog } = require('../lib/catalog-schema');
+const { normalizeCatalog } = require('../lib/catalog-schema');
+/* 新建 / 复制与 MCP 的 studio_create_project / studio_copy_project 共用同一份实现 */
+const { createProject, copyProject } = require('../lib/project-ops');
 
 module.exports = function projectRoutes() {
   const r = express.Router();
@@ -31,36 +33,16 @@ module.exports = function projectRoutes() {
     res.json({ items });
   });
 
-  /* 新建项目：kind 在这里定死（device / background / catalog），之后不允许改
-   * —— 两类项目的数据结构与编辑页完全不同，中途切换只会丢配置。 */
+  /* 新建项目：kind 在创建时定死（device / background / catalog），之后不允许改
+   * —— 两类项目的数据结构与编辑页完全不同，中途切换只会丢配置。
+   * 实现见 lib/project-ops.js（MCP studio_create_project 走同一份）。 */
   r.post('/projects', (req, res) => {
-    const id = 'p' + crypto.randomBytes(4).toString('hex');
-    const kind = String(req.body.kind || 'device').trim().toLowerCase();
-    if (kind !== 'device' && kind !== 'background' && kind !== 'catalog') {
-      return res.status(400).json({ error: 'kind 只能是 device（设备/门窗）、background（背景）或 catalog（家具包）' });
+    try {
+      const proj = createProject({ name: req.body.name, kind: req.body.kind });
+      res.json({ ok: true, project: proj });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
     }
-    const name = String(req.body.name || '').slice(0, 60);
-    let proj;
-    if (kind === 'catalog') {
-      proj = newCatalogProject(id, name || '未命名家具包');
-    } else {
-      proj = {
-        id,
-        name: name || '未命名插件',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        plugin: {
-          id, name: name || '未命名插件', kind,
-          type: kind === 'background' ? 'bg' : 'switch',
-          version: '1.0.0', description: '',
-        },
-        styles: [{ id: 'default', name: '默认造型', z: 0, icon: '', desc: '' }],
-        fields: [],
-        customJs: '',
-      };
-    }
-    writeProject(id, proj);
-    res.json({ ok: true, project: proj });
   });
 
   /* 导入项目：上传「导出项目」生成的备份 zip（project.json + preview.png + models/），
@@ -129,25 +111,15 @@ module.exports = function projectRoutes() {
     res.json({ ok: true });
   });
 
-  /* 复制项目（含 models / refs 文件） */
+  /* 复制项目（含 models/ 文件）；实现见 lib/project-ops.js，与 MCP studio_copy_project 共用 */
   r.post('/projects/:id/copy', (req, res) => {
-    let src;
-    try { src = readProject(req.params.id); }
-    catch (e) { return res.status(404).json({ error: 'project not found' }); }
-    const id = 'p' + crypto.randomBytes(4).toString('hex');
-    const copy = JSON.parse(JSON.stringify(src));
-    copy.id = id;
-    copy.name = String(req.body.name || (src.name + ' 副本')).slice(0, 60);
-    if (copy.plugin) {
-      copy.plugin.id = id;            // 插件 id 恒等于项目 id（副本也是）
-      copy.plugin.name = copy.name;   // 插件名称 = 项目名称
+    try {
+      const copy = copyProject({ sourceId: req.params.id, name: req.body.name });
+      res.json({ ok: true, project: copy });
+    } catch (e) {
+      const missing = /ENOENT|no such file|not found/i.test(e.message);
+      res.status(missing ? 404 : 400).json({ error: missing ? 'project not found' : e.message });
     }
-    copy.createdAt = new Date().toISOString();
-    writeProject(id, copy);
-    /* 模型文件一并复制（新项目目录与源项目同构，不需要先建目录） */
-    const srcModels = modelsDir(req.params.id);
-    if (fs.existsSync(srcModels)) fs.cpSync(srcModels, modelsDir(id), { recursive: true });
-    res.json({ ok: true, project: copy });
   });
 
   /* ---- 项目预览图（启动页卡片用） ----
