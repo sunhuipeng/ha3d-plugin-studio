@@ -1,0 +1,81 @@
+<script setup>
+/* 浮层容器：只负责浮层外壳（定位 / 宽度 / 动画），内容按 tab 拆到 panels/*.vue */
+import { computed, watch } from 'vue';
+import { useStudio } from '../stores';
+const { S, toast, ui } = useStudio();
+import SettingsPanel from './panels/SettingsPanel.vue';
+import PartsPanel from './panels/PartsPanel.vue';
+import StylesPanel from './panels/StylesPanel.vue';
+import FieldsPanel from './panels/FieldsPanel.vue';
+import CodePanel from './panels/CodePanel.vue';
+import PromptPanel from './panels/PromptPanel.vue';
+
+/* 各 tab 浮层独立宽度（px）。
+ * code 给到「按视口自适应」：优先 1180px，窄屏（笔记本 / 分屏）时退化为 100vw - 120px，
+ * 保证始终给右侧渲染区留出可点范围，同时尽量把长代码横着摊开、少折行。 */
+const PANEL_W = {
+  settings: '400px',
+  parts: '480px',
+  styles: '520px',
+  fields: '480px',
+  code: 'min(1240px, calc(100vw - 140px))',
+  prompt: '580px',
+};
+const panelWidth = computed(() => PANEL_W[ui.panel] || '400px');
+
+const PANELS = {
+  settings: SettingsPanel,
+  prompt: PromptPanel,
+  parts: PartsPanel,
+  styles: StylesPanel,
+  fields: FieldsPanel,
+  code: CodePanel,
+};
+const current = computed(() => PANELS[ui.panel] || null);
+
+/* 字段 / 样式两个 tab 顶部的协同说明：配置是「人机共用」的 */
+const showCfgNote = computed(() => ui.panel === 'styles' || ui.panel === 'fields');
+
+/* 配置锁：锁定后左侧所有浮层只读（纯前端状态，刷新页面即解锁）。
+ * isLocked / lockByText 是 ui store 的 getter，解锁直接调它的 Action。 */
+const locked = computed(() => ui.isLocked);
+const lockOwner = computed(() => ui.lockByText);
+function unlock() {
+  ui.setLock(false).catch((e) => toast(e.message, true));
+}
+
+/* 锁定 = 面板里的每个控件自己 disabled（各 panel 里 `:disabled="LOCK"`）。
+ * 这里只负责两件收尾：锁的瞬间 blur 掉正在编辑的输入框、关掉已展开的下拉浮层。
+ * 面板照常能打开 / 切换 / 滚动查看；MCP 直接写配置不经过前端，不受影响。 */
+watch(locked, (v) => {
+  if (!v) return;
+  const el = document.activeElement;
+  if (el && el.closest && el.closest('#float-panel')) el.blur();
+  document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+});
+</script>
+
+<template>
+  <transition name="fp">
+    <aside id="float-panel" v-if="ui.panel && S.proj" :style="{ width: panelWidth }">
+      <div class="fp-body" :class="{ locked, fill: ui.panel === 'code' }">
+        <!-- 配置锁：只读提示条（锁定期间面板内所有控件不响应，查看 / 滚动正常） -->
+        <div v-if="locked" class="lock-note">
+          <span class="lock-note-title">配置已锁定 · 只读</span>
+          <span class="lock-note-text">
+            由{{ lockOwner }}锁定，避免人和 AI 同时改配置互相覆盖<template v-if="ui.lock.note">（{{ ui.lock.note }}）</template>。
+            需要手动编辑请先解锁；刷新页面也会自动解锁。
+          </span>
+          <button class="lock-note-btn" @click="unlock">解锁</button>
+        </div>
+        <div v-if="showCfgNote && !locked" class="cfg-note">
+          此处的配置<b>支持手动编辑</b>，AI Agent 可随时读取最新内容；Agent 同样会动态
+          <b>新增、删除、修改</b>这些配置 —— 一切以<b>最终生成的代码</b>为准。
+        </div>
+        <div class="fp-content" :class="{ locked }">
+          <component :is="current" v-if="current" />
+        </div>
+      </div>
+    </aside>
+  </transition>
+</template>

@@ -1,0 +1,14 @@
+# 构建上下文排除项（镜像只带程序；前端在镜像内构建）
+.git
+.gitignore
+node_modules
+client/node_modules
+# 前端构建产物在镜像 Stage 1 里现做，本地 dist 不进上下文
+client/dist
+# 用户数据走挂载卷 /data
+data
+*.log
+.DS_Store
+**/.DS_Store
+# 本地打包产物
+dist/

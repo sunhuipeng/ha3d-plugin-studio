@@ -1,0 +1,327 @@
+/* 预览/验证域工具：set_style / set_option / click / label / reload / view / screenshot / card_screenshot / set_entity / get_runtime
+ * 全部经 ws-hub 中继到浏览器前端 harness 执行，依赖编辑页开着 */
+'use strict';
+
+const { z } = require('zod');
+const { readProject } = require('../lib/config');
+const { normalizeOptionType } = require('../lib/option-schema');
+const hub = require('../lib/ws-hub');
+const H = require('./helpers');
+
+/* 插件引擎专属动作（样式 / 参数 / 实体 / 点击 / 运行期）在家具页没有对应实现，
+ * 落到家具页只会白等中继超时，提前按项目类型挡掉。
+ * view / screenshot / reload 是公共能力：两页共用同一个 ThreeHost 的相机与截图实现，
+ * 只是前端注册了不同形状的预览门面（见 ws-client.js 的 ensureViewportStage）。 */
+const COMMON_RELAY = new Set(['reload', 'view', 'screenshot']);
+async function relay(pid, name, args, timeout) {
+  if (!COMMON_RELAY.has(name)) H.assertPluginProject(pid);
+  try {
+    return await hub.call(pid, name, args, timeout);
+  } catch (e) {
+    /* 调用流程口径：项目没在前端打开时，直接告诉调用方「先 studio_open_project 再打这个工具」，
+     * 而不是让他对着「请先在浏览器打开编辑页」自己去猜要调哪个工具。
+     * 注意这不是自动开项目 —— 打开项目始终是调用方的一步明确动作。 */
+    if (e.code === 'NO_FRONTEND') {
+      throw Object.assign(new Error(
+        `项目 ${pid} 没有在前端打开。正确顺序：先 studio_open_project({ "projectId": "${pid}" }) 打开它，`
+        + `成功返回后再调用 studio_${name}`,
+      ), { code: e.code });
+    }
+    throw e;
+  }
+}
+
+function register(server) {
+  server.tool(
+    'studio_set_style',
+    '切换预览样式：前端立即清空旧渲染并用新样式重建 3D（styleId 见 studio_get_project），返回渲染结果（当前样式 / 实例参数 / 实体）',
+    {
+      projectId: z.string().optional(),
+      styleId: z.string().min(1).describe('要切换到的样式 id（插件内部 id，如 single_door / roller_shutter）'),
+    },
+    async ({ projectId, styleId }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const p = readProject(pid);
+        if (!(p.styles || []).some((s) => s && s.id === styleId)) {
+          throw new Error('样式不存在: ' + styleId + '（可用 studio_get_project 查）');
+        }
+        return H.text(await relay(pid, 'set_style', { styleId }, 60000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_set_option',
+    '样式参数调节（AI 自动核验用）：把某个样式参数的值改成指定值（写 styles[].options[].def = 面板滑条上的那个值）→ 前端重跑代码出图，返回改前/改后的值 + 引擎实际吃到的 ctx.options。不传 key 时只读当前样式的全部参数值。改完接 studio_screenshot 对比效果，核验完记得调回原值',
+    {
+      projectId: z.string().optional(),
+      styleId: z.string().optional().describe('要改哪个样式（缺省 = 编辑页当前选中的样式）'),
+      key: z.string().optional().describe('参数 key，如 brightness / hand；不传 = 只读参数值'),
+      value: z.union([z.number(), z.string(), z.boolean()]).optional()
+        .describe('新值：range/number 传数字（会按 min/max 夹取），checkbox 传 true/false，select/text 传字符串'),
+    },
+    async ({ projectId, styleId, key, value }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const p = readProject(pid);
+        const styles = (p.styles || []).filter((s) => s && s.id);
+        if (!styles.length) throw new Error('项目没有任何样式（先在面板里建一个样式）');
+        const pick = styleId ? styles.find((s) => s.id === styleId) : null;
+        if (styleId && !pick) throw new Error('样式不存在: ' + styleId + '（可用 studio_get_project 查）');
+
+        /* 只读：直接读盘上的 def（等价于面板上显示的当前值），不需要前端在线 */
+        if (!key) {
+          const rows = (pick ? [pick] : styles).map((s) => ({
+            styleId: s.id,
+            options: (s.options || []).filter((o) => o && o.key).map((o) => ({
+              key: o.key, label: o.label || o.key, type: normalizeOptionType(o.type), value: o.def,
+            })),
+          }));
+          return H.text({ projectId: pid, readOnly: true, styles: rows, current: pick ? pick.id : (styles[0] && styles[0].id) });
+        }
+        if (value === undefined) throw new Error('改参数要同时传 value；只想看当前值就别传 key');
+
+        const hit = (pick ? [pick] : styles)
+          .find((s) => (s.options || []).some((o) => o && o.key === key));
+        if (!hit) {
+          const all = [...new Set(styles.flatMap((s) => (s.options || []).map((o) => o && o.key)).filter(Boolean))];
+          throw new Error(`参数不存在: ${key}（项目里可用的参数：${all.join(', ') || '无'}）`);
+        }
+        return H.text(await relay(pid, 'set_option', { styleId: pick ? pick.id : undefined, key, value }, 60000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_click',
+    '点击设备（等价于在页面上点设备主体或它的状态标签）：按插件 click 配置把主实体状态切换（on↔off / 服务动作）→ 插件 update() 重绘。先用 studio_label 看当前文案，点完再 screenshot 验证变化',
+    { projectId: z.string().optional() },
+    async ({ projectId }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        return H.text(await relay(pid, 'click', {}, 30000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_label',
+    '读取设备标签当前状态：主实体 id、标签文案（插件 stateText 的结果）、是否可点击、当前是否开启。点击前先看一眼',
+    { projectId: z.string().optional() },
+    async ({ projectId }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        return H.text(await relay(pid, 'label', {}, 30000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_reload',
+    '让打开的编辑页重新加载：前端代码重新构建后（或要重置预览状态时）调用，浏览器会拉取最新 bundle，免手动 F5。页面会断开 WS 重连，属正常现象',
+    { projectId: z.string().optional() },
+    async ({ projectId }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        return H.text(await relay(pid, 'reload', {}, 15000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_view',
+    '只调整观看方式、不出图（插件页 / 家具页通用，共用 ThreeHost 的相机实现）：转模型 / 移模型 / 归位，或转相机 / 平移 / 缩放。'
+    + '家具页可传 itemId 先选中左侧清单里的某件家具（等价点击清单项，会等 GLB 加载完）。排查问题时先用它把姿态摆到看得清的位置，再调 studio_screenshot 按角度拍'
+    + '。前置：目标项目必须已在前端打开 —— 不是当前项目时先 studio_open_project 再调本工具',
+    {
+      projectId: z.string().optional(),
+      itemId: z.string().optional().describe('家具页专用：先选中这件家具再摆姿态（等价于点击左侧清单；条目 id 见 studio_list_catalog_items）'),
+      /* 模型整体姿态（排查时最常用） */
+      modelRotate: z.array(z.number()).length(3).optional().describe('模型整体旋转 [rx,ry,rz]（度，累加）'),
+      modelMove: z.array(z.number()).length(3).optional().describe('模型整体位移 [x,y,z]（米，累加）'),
+      modelSet: z.object({
+        rx: z.number().optional(), ry: z.number().optional(), rz: z.number().optional(),
+        x: z.number().optional(), y: z.number().optional(), z: z.number().optional(),
+      }).optional().describe('模型绝对姿态（覆盖，不累加）'),
+      modelReset: z.boolean().optional().describe('模型姿态归位'),
+      /* 相机 */
+      view: z.enum(H.SCREEN_VIEWS).optional().describe('切到某个预设视角'),
+      azimuth: z.number().optional().describe('绝对方位角（度，0 = 从 +Z 看）'),
+      elevation: z.number().optional().describe('绝对俯仰角（度，0 = 平视，90 = 正上方）'),
+      distance: z.number().optional().describe('相机到目标的距离（米）'),
+      zoom: z.number().optional().describe('距离系数（0.5 更近，2 更远）'),
+      target: z.array(z.number()).length(3).optional().describe('观察目标点 [x,y,z]'),
+      orbitAzimuth: z.number().optional().describe('相对当前水平旋转（度，正值向右）'),
+      orbitElevation: z.number().optional().describe('相对当前俯仰旋转（度，正值向上）'),
+      panX: z.number().optional().describe('水平平移（视口宽度比例，0.1 = 右移 10%）'),
+      panY: z.number().optional().describe('垂直平移（视口高度比例）'),
+      zoomFactor: z.number().optional().describe('相对缩放（>1 拉远，<1 拉近）'),
+    },
+    async (args) => {
+      try {
+        const pid = H.requirePid(args.projectId);
+        const { projectId, ...rest } = args;
+        return H.text(await relay(pid, 'view', rest, 30000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_screenshot',
+    '截图返回 PNG（插件页 / 家具页通用，共用 ThreeHost 的离屏渲染）：截当前 3D 预览的真实渲染结果。'
+    + '可指定视角预设、绝对机位、相对旋转/平移/缩放，也可以先把模型整体转一下再拍；'
+    + '家具页可传 itemId 一步完成「选中清单某件 → 等模型加载 → 按指定机位截图」。'
+    + '前置：目标项目必须已在前端打开 —— 传的 projectId 不是当前打开的项目时，先 studio_open_project 打开它再截图',
+    {
+      projectId: z.string().optional(),
+      itemId: z.string().optional().describe('家具页专用：先选中这件家具、等 GLB 加载完再拍（避免拍到切换瞬间的空场景）'),
+      view: z.enum(H.SCREEN_VIEWS).optional().describe('视角预设：iso(四分之三) / front / back / left / right / top / low(低角) / detail(特写)'),
+      azimuth: z.number().optional().describe('绝对方位角（度，0 = 从 +Z 看）'),
+      elevation: z.number().optional().describe('绝对俯仰角（度，0 = 平视，90 = 正上方）'),
+      distance: z.number().optional().describe('相机到目标距离（米）'),
+      zoom: z.number().optional().describe('距离系数（0.5 更近，2 更远）'),
+      target: z.array(z.number()).length(3).optional().describe('观察目标点 [x,y,z]'),
+      orbitAzimuth: z.number().optional().describe('相对当前水平旋转（度，正值向右）'),
+      orbitElevation: z.number().optional().describe('相对当前俯仰旋转（度，正值向上）'),
+      panX: z.number().optional().describe('水平平移（视口宽度比例，0.1 = 右移 10%）'),
+      panY: z.number().optional().describe('垂直平移（视口高度比例）'),
+      zoomFactor: z.number().optional().describe('相对缩放（>1 拉远，<1 拉近）'),
+      modelRotate: z.array(z.number()).length(3).optional().describe('模型整体旋转 [rx,ry,rz]（度，累加）'),
+      modelMove: z.array(z.number()).length(3).optional().describe('模型整体位移 [x,y,z]（米，累加）'),
+      modelSet: z.object({
+        rx: z.number().optional(), ry: z.number().optional(), rz: z.number().optional(),
+        x: z.number().optional(), y: z.number().optional(), z: z.number().optional(),
+      }).optional().describe('模型绝对姿态（覆盖，不累加）'),
+      modelReset: z.boolean().optional().describe('先把模型姿态归位再拍'),
+      width: z.number().int().min(64).max(2048).optional(),
+      height: z.number().int().min(64).max(2048).optional(),
+      withGrid: z.boolean().optional().describe('是否显示地面网格'),
+      background: z.number().int().optional().describe('背景色（0xRRGGBB 十进制），-1 = 透明'),
+    },
+    async (args) => {
+      try {
+        const pid = H.requirePid(args.projectId);
+        const { projectId, ...rest } = args;
+        const r = await relay(pid, 'screenshot', rest, 60000);
+        const b64 = String(r?.dataUrl || '').replace(/^data:image\/png;base64,/, '');
+        if (!b64) return H.fail('前端未返回截图');
+        return {
+          content: [
+            { type: 'image', data: b64, mimeType: 'image/png' },
+            { type: 'text', text: JSON.stringify({ projectId: pid, preview: r.preview }) },
+          ],
+        };
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  server.tool(
+    'studio_card_screenshot',
+    '截图控制卡（把卡片预览区的 HTML 节点转成 PNG 返回）：**用途单一——核对布局是否合理**。'
+    + '行列分配、列宽是否被挤压、文案是否截断、控件是否溢出或留白异常，这些只有渲染成图才看得出来。'
+    + '**低频工具，不要当验证流水线用**：只在改了 cards() 结构、用户明确要看卡片外观、或怀疑布局有问题时截一张；'
+    + '不要每推一个实体状态就截一张，也不要连拍多张做「状态对比」。'
+    + '**卡内元素状态（开关 on/off、读数数值、require 是否命中）不在本工具的判断范围内，交给用户目视验收**：'
+    + 'AI 要判断这些请用 studio_set_entity 的返回、studio_label、studio_get_runtime 读结构化状态，比看图可靠。'
+    + '仅设备类插件有卡（纯造型家具 / 背景 / 家具包无实体契约，不出卡）。',
+    {
+      projectId: z.string().optional(),
+      pixelRatio: z.number().min(1).max(4).optional()
+        .describe('清晰度倍率（1~4），默认 2 —— 卡片本身约 320px 宽，2 倍图文字更清楚'),
+      debug: z.boolean().optional()
+        .describe('附带中间产物诊断信息（SVG 序列化文本摘要），截图异常时用来定位是克隆/序列化/画布哪一环出的问题'),
+    },
+    async (args) => {
+      try {
+        const pid = H.requirePid(args.projectId);
+        const { projectId, ...rest } = args;
+        const r = await relay(pid, 'card_screenshot', rest, 60000);
+        const b64 = String(r?.dataUrl || '').replace(/^data:image\/png;base64,/, '');
+        if (!b64) return H.fail('前端未返回卡片截图（确认是设备类插件，且卡片预览区已渲染）');
+        return {
+          content: [
+            { type: 'image', data: b64, mimeType: 'image/png' },
+            { type: 'text', text: JSON.stringify({ projectId: pid, ...(r.meta || {}) }) },
+          ],
+        };
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  /* ---------------- 验状态变化 ---------------- */
+
+  server.tool(
+    'studio_set_entity',
+    '给某个绑定实体推一个新状态（模拟 HA），触发插件 update/重绘，用来验证「状态变化 → 造型变化」是否符合预期。实体 id 就在插件代码的 getState/fields 里',
+    {
+      projectId: z.string().optional(),
+      entityId: z.string().describe('实体 id，如 binary_sensor.preview_main'),
+      state: z.string().describe("新状态，如 'on' / 'off' / 'open' / '25'"),
+      attributes: z.record(z.any()).optional().describe('可选，覆盖属性（如 unit_of_measurement）'),
+    },
+    async ({ projectId, entityId, state, attributes }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        return H.text(await relay(pid, 'set_entity', { entityId, state, attributes }, 25000));
+      } catch (e) { return H.fail(e.message); }
+    },
+  );
+
+  /* ---------------- 重新渲染 ---------------- */
+  server.tool(
+    'studio_render',
+    '立刻重新渲染当前项目：重新执行插件代码、按当前项目配置（styles / fields）合并后重建场景，返回渲染结果（样式、实体、参数实际取值）。'
+    + 'studio_sync_config 之后画面没跟上、或想确认当前配置的渲染效果时调它；只重渲不写盘。'
+    + 'refreshConfig=true 时先按服务器 project.json 重贴内存配置（手改过 JSON 的场合）；不会刷新整个页面（那用 studio_reload）',
+    {
+      projectId: z.string().optional().describe('项目 id；省略时自动使用唯一已打开的项目'),
+      view: z.enum(['iso', 'front', 'back', 'left', 'right', 'top', 'low', 'detail']).optional()
+        .describe('渲染后套用的视角预设（缺省保持当前视角）'),
+      refreshConfig: z.boolean().optional().describe('先从服务器重读 project.json 的 styles / fields / 代码，再渲染'),
+    },
+    async ({ projectId, view, refreshConfig }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const st = await relay(pid, 'render', { view, refreshConfig }, 90000);
+        const r = st || {};
+        return H.text({
+          ok: r.ok !== false,
+          projectId: pid,
+          error: r.error || '',
+          plugin: { id: r.pluginId || '', kind: r.kind || '', type: r.type || '', name: r.name || '' },
+          style: { current: r.styleId || '', all: r.styles || [] },
+          size: r.size || null,
+          label: r.label || '',
+          entities: (r.entities || []).map((e) => ({ entityId: e.entityId, role: e.role, state: e.state })),
+          instance: r.instance || null,
+        });
+      } catch (e) {
+        return H.fail(H.friendlyRelayError(e, '浏览器里的页面还是旧版本前端，请刷新编辑页后重试'));
+      }
+    },
+  );
+
+  /* ---------------- 运行期体检 ---------------- */
+  server.tool(
+    'studio_get_runtime',
+    '运行期体检：返回渲染状态（ok/错误/加载中）、当前项目与样式、当前样式参数实际取值、实体状态、模型包围盒、相机，以及浏览器控制台最近报错（插件的 update / plan2d / 动画帧里抛的异常都被引擎吞成 console.warn，只有这里能看到）。改完代码看不出变化、或画面空白时先调它',
+    {
+      projectId: z.string().optional(),
+      level: z.enum(['all', 'error']).optional().describe('只取 error（含 warn）还是全部（默认 all：errors + warnings 分开返回）'),
+      limit: z.number().optional().describe('日志条数上限（默认 30，最多 120）'),
+      clear: z.boolean().optional().describe('读完顺手清空日志缓冲，方便下一轮只看新增报错'),
+    },
+    async ({ projectId, level, limit, clear }) => {
+      try {
+        const pid = H.requirePid(projectId);
+        const st = await relay(pid, 'runtime', { level, limit, clear }, 25000);
+        return H.text(st);
+      } catch (e) {
+        return H.fail(H.friendlyRelayError(e, '浏览器里的页面还是旧版本前端，请刷新编辑页后重试'));
+      }
+    },
+  );
+}
+
+module.exports = { register };

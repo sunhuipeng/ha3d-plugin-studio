@@ -1,0 +1,148 @@
+/* 路径常量 / 配置 / 项目数据读写 */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { normalizeCatalog } = require('./catalog-schema');
+
+const ROOT = path.join(__dirname, '..', '..');   // server/lib/ → 仓库根（文件挪进 lib/ 后多退一级）
+/* 端口与数据目录支持环境变量覆盖（Docker 部署用，对齐 ha-3d-home 的约定）：
+ *   PORT                  监听端口，默认 8098
+ *   HA3D_STUDIO_DATA_DIR  数据目录（projects/ + config.json），默认 <项目根>/data；容器里指向挂载卷 /data */
+const PORT = Number(process.env.PORT) || 8098;
+const CLIENT_DIST = path.join(ROOT, 'client', 'dist');
+const DATA_DIR = process.env.HA3D_STUDIO_DATA_DIR
+  ? path.resolve(process.env.HA3D_STUDIO_DATA_DIR)
+  : path.join(ROOT, 'data');
+const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+const safeId = (s) => (/^[a-z][a-z0-9_]{1,39}$/.test(String(s || '')) ? s : null);
+const safeFile = (s) => {
+  const base = path.basename(String(s || ''));
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(base) ? base : null;
+};
+const ensureDir = (dir) => fs.mkdirSync(dir, { recursive: true });
+
+const projectDir = (id) => path.join(PROJECTS_DIR, id);
+const projectFile = (id) => path.join(projectDir(id), 'project.json');
+const modelsDir = (id) => path.join(projectDir(id), 'models');
+
+/* 老项目兼容：门/窗原先的 kind:'opening' 已废除 → 统一成 kind:'device' + type 'door'/'window'
+ * （home 侧同一口径：kind 有 device / background / catalog 三类，门窗靠 type 区分）。
+ * 读盘时归一，REST / MCP / 导出 / 预览拿到的都是新口径；下次保存自然写回新值。
+ * kind 在项目创建时确定、之后不可改（PUT 时由 projects.js 比对磁盘值拒绝变更）。 */
+function normalizeProject(proj) {
+  const p = proj && proj.plugin;
+  if (p) {
+    if (p.kind === 'opening' || !p.kind) p.kind = 'device';
+  }
+  /* 家具项目（catalog）：条目数组补齐默认值，缺失的 catalog 结构就地建出来 */
+  if (p && p.kind === 'catalog') normalizeCatalog(proj);
+  return proj;
+}
+
+const readProject = (id) => normalizeProject(JSON.parse(fs.readFileSync(projectFile(id), 'utf8')));
+/* 原子落盘：先写临时文件再 rename。直接 writeFileSync 的话，并发读方（REST GET / MCP / 导出）
+ * 可能读到写了一半的 JSON（readProject 直接 JSON.parse 抛错），rename 保证读方要么看到旧全量、
+ * 要么看到新全量。多写方（REST PUT / MCP studio_write_project / 导入）之间的覆盖顺序仍靠
+ * 上层语义保证，这里只消灭「半截文件」这一类。 */
+const atomicWrite = (file, data) => {
+  const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+  try {
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* ignore */ }
+    throw e;
+  }
+};
+const writeProject = (id, proj) => {
+  ensureDir(projectDir(id));
+  proj.updatedAt = new Date().toISOString();
+  atomicWrite(projectFile(id), JSON.stringify(proj, null, 2));
+};
+
+function getConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
+  catch (e) { return {}; }
+}
+const saveConfig = (cfg) => { ensureDir(DATA_DIR); atomicWrite(CONFIG_FILE, JSON.stringify(cfg, null, 2)); };
+/* 远程发布目标: ha-3d-home 的主机地址 + 安装密钥（存 config.json 的 remote 字段）。
+ * 发布时服务端把插件打包成 zip，POST 到 {host}/api/plugins/install 远程安装（home 侧已实现）。 */
+const DEFAULT_REMOTE_HOST = 'http://localhost:8077';
+const remoteTarget = () => {
+  const cfg = getConfig();
+  return {
+    host: (cfg.remote && cfg.remote.host) || DEFAULT_REMOTE_HOST,
+    key: (cfg.remote && cfg.remote.key) || '',
+  };
+};
+/* 发布前确认目标：主机地址 + 安装密钥都必须齐备。
+ * home 的 /api/plugins/install 已对登录门禁放行，X-Install-Key 是它唯一的鉴权手段；
+ * 空密钥发过去只会拿到 401，所以在打包之前就拦下来，把问题直接指向 studio 设置页。 */
+function assertPublishTarget() {
+  const remote = remoteTarget();
+  if (!/^https?:\/\/.+/.test(remote.host)) {
+    throw new Error('未配置 ha-3d-home 主机地址，请在启动页右下角「发布目标」里填写');
+  }
+  if (!/^[A-Za-z0-9_.:@-]{6,128}$/.test(remote.key)) {
+    throw new Error('未配置有效的安装密钥（6–128 位字母/数字/_ . : @ -），请在 studio 设置页确认与 home 一致的密钥');
+  }
+  return remote;
+}
+
+function listModels(id) {
+  try { return fs.readdirSync(modelsDir(id)).filter((f) => f.toLowerCase().endsWith('.glb')); } catch (e) { return []; }
+}
+
+/* 项目列表基础信息（REST GET /projects 与 MCP studio_list_projects 共用，按最近更新排序）。
+ * 返回磁盘目录 id + 项目元信息；调用方在基础上补各自需要的字段（如 hasCustomJs / kind） */
+function listProjectSummaries() {
+  const items = [];
+  for (const d of fs.readdirSync(PROJECTS_DIR)) {
+    if (d.startsWith('.')) continue;
+    try {
+      const pr = readProject(d);
+      items.push({
+        id: pr.id,
+        dirId: d,
+        name: pr.name,
+        updatedAt: pr.updatedAt || '',
+        pluginId: (pr.plugin && pr.plugin.id) || '',
+        kind: (pr.plugin && pr.plugin.kind) || '',
+        type: (pr.plugin && pr.plugin.type) || '',
+        /* 家具项目：卡片角标显示件数 */
+        items: (pr.catalog && Array.isArray(pr.catalog.items)) ? pr.catalog.items.length : 0,
+        models: listModels(d).length,
+      });
+    } catch (e) { /* 跳过损坏的项目目录 */ }
+  }
+  return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/* 删除: 优先 rmSync；部分环境（如 WorkBuddy 沙箱）拦截 rm，降级 rename 到 .deleted-* 隐藏目录。
+ * 项目删除与模型文件删除共用（projects.js / models.js 与 MCP 工具口径保持一致） */
+function safeRemove(targetPath) {
+  try {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    return { ok: true };
+  } catch (e) {
+    try {
+      const parent = path.dirname(targetPath);
+      const hidden = path.join(parent, '.deleted-' + Date.now() + '-' + path.basename(targetPath));
+      fs.renameSync(targetPath, hidden);
+      return { ok: true, degraded: true };
+    } catch (e2) {
+      return { ok: false, error: e2.message };
+    }
+  }
+}
+
+module.exports = {
+  PORT, CLIENT_DIST, PROJECTS_DIR,
+  safeId, safeFile, ensureDir, safeRemove,
+  modelsDir,
+  readProject, writeProject, getConfig, saveConfig, remoteTarget, assertPublishTarget,
+  listModels, listProjectSummaries,
+};
