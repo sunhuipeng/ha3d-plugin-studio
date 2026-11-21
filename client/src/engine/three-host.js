@@ -486,7 +486,16 @@ export class ThreeHost {
 
   /* ---------------- 设备点击 / 标签定位 ---------------- */
 
-  /** 屏幕坐标（clientX/Y）→ 射线拾取；命中 meshes 返回第一个交点对象，否则 null */
+  /** 屏幕坐标（clientX/Y）→ 射线拾取；命中真实本体返回该 mesh，否则 null。
+   *
+   * 与 home 的 deviceFromHits 同口径的两级语义（命中顺序由 raycaster 按距离排好 近→远）：
+   *   · userData.pickBlock —— 飘离本体的动效（锅口蒸汽 / 粒子）：打到就算点在空处，
+   *     整条射线作废返回 null。它飘在本体上方，跳过会命中下方本体照样触发点击。
+   *   · userData.noPick —— 贴着本体的光效（光晕 / 光锥 / 贴面光）：废弃该命中，
+   *     继续看更远的真实本体（点光晕 = 点灯罩）。
+   *   · 两者都不带的 mesh 视为设备本体，返回它。
+   * studio 的 meshes 是扁平列表（没有 home 那种 userData.device 组），故沿父链同时查两级标记。
+   * Three r160 的 raycast 不检查 visible，隐藏的光效仍会出现在 hits 里，一并按标记过滤。 */
   pickAt(clientX, clientY, meshes) {
     if (!this.renderer || !this.camera || !meshes || !meshes.length) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -497,7 +506,20 @@ export class ThreeHost {
     if (!this._raycaster) this._raycaster = new THREE.Raycaster();
     this._raycaster.setFromCamera(ndc, this.camera);
     const hits = this._raycaster.intersectObjects(meshes, false);
-    return hits.length ? hits[0].object : null;
+    for (let i = 0; i < hits.length; i++) {
+      let o = hits[i] && hits[i].object;
+      let blocked = false;
+      let skip = false;
+      while (o) {
+        const ud = o.userData || {};
+        if (ud.pickBlock) { blocked = true; break; }
+        if (ud.noPick) { skip = true; break; }
+        o = o.parent;
+      }
+      if (blocked) return null;                 // 最近命中是飘离本体的动效 → 点空白
+      if (!skip) return hits[i].object;         // 命中真实本体
+    }
+    return null;
   }
 
   /** 世界坐标 → 画布内像素坐标（标签跟随设备用）；behind = 点在相机身后 */
